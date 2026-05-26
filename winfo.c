@@ -1,0 +1,295 @@
+// winfo.c  - wire format info parser
+// -----------------------------------------------------------------------
+// Derived from uCurses terminfo format string parser.
+// RPN stack, arithmetic/logic/conditionals, binary byte emission.
+//
+// New specifiers vs terminfo:
+//   %b  - emit 1 byte  (low byte of TOS)
+//   %w  - emit 2 bytes big-endian (uint16)
+//   %W  - emit 4 bytes big-endian (uint32)
+// -----------------------------------------------------------------------
+
+#include <assert.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+#include "winfo.h"
+
+// -----------------------------------------------------------------------
+
+static wi_vars_t *wi;           // current parse context
+
+// -----------------------------------------------------------------------
+
+static void b_emit(uint8_t byte)
+{
+    assert(wi->out_len < wi->out_size);
+    wi->out[wi->out_len++] = byte;
+}
+
+// -----------------------------------------------------------------------
+// RPN stack
+
+static void fs_push(int64_t n)
+{
+    assert(wi->fsp < WI_STACK_DEPTH);
+    wi->fstack[wi->fsp++] = n;
+}
+
+static int64_t fs_pop(void)
+{
+    assert(wi->fsp > 0);
+    return wi->fstack[--wi->fsp];
+}
+
+// -----------------------------------------------------------------------
+// variable access
+
+static int64_t *get_var_addr(void)
+{
+    char c1 = (char)*wi->f_str++;
+
+    return ((c1 >= 'a') && (c1 <= 'z'))
+        ? &wi->atoz[c1 - 'a']
+        : &wi->AtoZ[c1 - 'A'];
+}
+
+// -----------------------------------------------------------------------
+// scan to next % specifier (used by conditionals)
+
+static char scan(void)
+{
+    while (*wi->f_str++ != '%')
+        ;
+    return (char)*wi->f_str++;
+}
+
+// -----------------------------------------------------------------------
+// specifier implementations
+// -----------------------------------------------------------------------
+
+static void _percent(void) { b_emit('%'); }
+
+static void _and  (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b &  a); }
+static void _andl (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b && a); }
+static void _or   (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b |  a); }
+static void _orl  (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b || a); }
+static void _xor  (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b ^  a); }
+static void _not  (void) { fs_push(~fs_pop()); }
+static void _notl (void) { fs_push(!fs_pop()); }
+static void _plus (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b + a); }
+static void _minus(void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b - a); }
+static void _star (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b * a); }
+static void _div  (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(a ? b / a : 0); }
+static void _mod  (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(a ? b % a : 0); }
+
+static void _equals (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b == a); }
+static void _greater(void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b >  a); }
+static void _less   (void) { int64_t a = fs_pop(), b = fs_pop(); fs_push(b <  a); }
+
+// -----------------------------------------------------------------------
+// %'x'  push literal character value
+
+static void _tick(void)
+{
+    fs_push((char)*wi->f_str);
+    wi->f_str += 2;             // skip char and closing '
+}
+
+// -----------------------------------------------------------------------
+// %{123}  push decimal literal
+
+static void _brace(void)
+{
+    int64_t n = 0;
+    char c1;
+
+    while ((c1 = (char)*wi->f_str++) != '}')
+    {
+        n *= 10;
+        n += c1 - '0';
+    }
+
+    fs_push(n);
+}
+
+// -----------------------------------------------------------------------
+// %p1..%p9  push parameter
+
+static void _p(void)
+{
+    uint8_t c1 = *wi->f_str++ & 0x0f;
+    fs_push(wi->params[c1 - 1]);
+}
+
+// -----------------------------------------------------------------------
+// %Px / %gx  store/load named variable
+
+static void _P(void) { *get_var_addr() = fs_pop(); }
+static void _g(void) { fs_push(*get_var_addr()); }
+
+// -----------------------------------------------------------------------
+// %?..%t..%e..%;  conditional
+
+static void _t(void)
+{
+    char c1;
+
+    if (fs_pop() != 0)
+        return;
+
+    for (;;)
+    {
+        c1 = scan();
+        if ((c1 == 'e') || (c1 == ';'))
+            break;
+    }
+}
+
+static void _e(void)
+{
+    char c1;
+    do { c1 = scan(); } while (c1 != ';');
+}
+
+// -----------------------------------------------------------------------
+// emit specifiers
+
+// %c  emit low byte of TOS (terminfo compatible)
+static void _c(void) { b_emit((uint8_t)fs_pop()); }
+
+// %b  emit 1 byte (alias for %c, explicit binary intent)
+static void _b(void) { b_emit((uint8_t)fs_pop()); }
+
+// %w  emit 2 bytes big-endian
+static void _w(void)
+{
+    uint16_t v = (uint16_t)fs_pop();
+    b_emit((uint8_t)(v >> 8));
+    b_emit((uint8_t)(v & 0xff));
+}
+
+// %W  emit 4 bytes big-endian
+static void _bW(void)
+{
+    uint32_t v = (uint32_t)fs_pop();
+    b_emit((uint8_t)(v >> 24));
+    b_emit((uint8_t)(v >> 16));
+    b_emit((uint8_t)(v >>  8));
+    b_emit((uint8_t)(v & 0xff));
+}
+
+// %r  emit raw buffer: TOS = length, next = pointer
+static void _r(void)
+{
+    size_t   len = (size_t)fs_pop();
+    uint8_t *ptr = (uint8_t *)(uintptr_t)fs_pop();
+    size_t   i;
+
+    for (i = 0; i < len; i++)
+        b_emit(ptr[i]);
+}
+
+// -----------------------------------------------------------------------
+// dispatch table
+
+typedef void (*wi_fn_t)(void);
+
+typedef struct
+{
+    int32_t  op;
+    wi_fn_t  fn;
+} wi_op_t;
+
+static const wi_op_t ops[] =
+{
+    { '%', _percent }, { 'p', _p      }, { 'c', _c      },
+    { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
+    { '&', _and     }, { 'A', _andl   }, { '|', _or     },
+    { 'O', _orl     }, { '^', _xor    }, { '~', _not    },
+    { '!', _notl    }, { '+', _plus   }, { '-', _minus   },
+    { '*', _star    }, { '/', _div    }, { 'm', _mod     },
+    { '=', _equals  }, { '>', _greater }, { '<', _less   },
+    { 0x27, _tick   }, { '{', _brace  }, { 'P', _P      },
+    { 'g', _g       }, { '?', NULL    }, { 't', _t      },
+    { 'e', _e       }, { ';', NULL    },
+};
+
+#define OPS_COUNT  (sizeof(ops) / sizeof(ops[0]))
+
+// -----------------------------------------------------------------------
+
+static int wi_switch(int32_t op)
+{
+    size_t i;
+
+    for (i = 0; i < OPS_COUNT; i++)
+    {
+        if (ops[i].op == op)
+        {
+            if (ops[i].fn)
+                ops[i].fn();
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// -----------------------------------------------------------------------
+
+static int next_c(void)
+{
+    wi->digits = 1;
+    int c1 = *wi->f_str++;
+
+    if ((c1 == '2') || (c1 == '3'))
+    {
+        wi->digits = c1 & 0x0f;
+        c1 = *wi->f_str++;
+    }
+
+    return c1;
+}
+
+// -----------------------------------------------------------------------
+
+void wi_init(wi_vars_t *v, uint8_t *buf, size_t bufsize,
+             int64_t *params, int nparams)
+{
+    memset(v, 0, sizeof(*v));
+
+    v->out      = buf;
+    v->out_size = bufsize;
+
+    if (params && nparams > 0)
+    {
+        if (nparams > WI_MAX_PARAMS)
+            nparams = WI_MAX_PARAMS;
+        memcpy(v->params, params, (size_t)nparams * sizeof(int64_t));
+    }
+}
+
+// -----------------------------------------------------------------------
+
+size_t wi_parse(wi_vars_t *v, const char *fmt)
+{
+    wi = v;
+    wi->f_str  = (const uint8_t *)fmt;
+    wi->out_len = 0;
+
+    while (*wi->f_str)
+    {
+        int c1 = *wi->f_str++;
+
+        if (c1 == '%')
+            wi_switch(next_c());
+        else
+            b_emit((uint8_t)c1);
+    }
+
+    return wi->out_len;
+}
+
+// =======================================================================
