@@ -159,6 +159,78 @@ txid=0xa0ac  flags=0x8180  questions=1  answers=2
 
 ---
 
+## Decoding incoming messages
+
+winfo can also walk an incoming buffer and extract field values.  The same
+RPN stack, variables, and conditional logic are available; the difference
+is that `%B`, `%S`, and `%L` *read* bytes from an input buffer and push
+them onto the stack rather than popping bytes and writing them out.
+
+### Decode specifiers
+
+| Specifier | Effect |
+|-----------|--------|
+| `%B`      | read 1 byte from input → push |
+| `%S`      | read 2 bytes big-endian → push as uint16 |
+| `%L`      | read 4 bytes big-endian → push as uint32 |
+
+Results are captured into named variables with `%Pa`, `%Pb`, … and read
+back from `wi_vars_t.atoz[]` after parsing.
+
+### Initialisation
+
+```c
+wi_decode_init(&v, buf, buflen, NULL, 0);
+wi_parse(&v, format_string);
+```
+
+`v.in_pos` advances as bytes are consumed.  Multiple `wi_parse()` calls on
+the same `wi_vars_t` continue from where the previous call left off, so
+header and body sections can be decoded in sequence without
+re-initialising.
+
+### DNS response header example
+
+```c
+const char wi_dns_resp_hdr[] =
+    "%S%Pa"     // txid    -> a
+    "%S%Pb"     // flags   -> b
+    "%S%Pc"     // qdcount -> c
+    "%S%Pd"     // ancount -> d
+    "%S%Pe"     // nscount -> e
+    "%S%Pf";    // arcount -> f
+
+wi_decode_init(&v, response, rlen, NULL, 0);
+wi_parse(&v, wi_dns_resp_hdr);
+
+uint16_t txid    = (uint16_t)v.atoz[0];  // a
+uint16_t flags   = (uint16_t)v.atoz[1];  // b
+uint16_t ancount = (uint16_t)v.atoz[3];  // d
+```
+
+After this call `v.in_pos` is 12 (the DNS fixed header length), ready to
+continue into the question or answer sections.  The DNS answer RR fixed
+fields (type, class, TTL, rdlength) are decoded the same way after the
+variable-length name is skipped:
+
+```c
+const char wi_dns_rr[] =
+    "%S%Pa"     // type     -> a
+    "%S%Pb"     // class    -> b
+    "%L%Pc"     // ttl      -> c  (uint32)
+    "%S%Pd";    // rdlength -> d
+
+v.in_pos = (size_t)(p - buf);  // sync past skipped name
+wi_parse(&v, wi_dns_rr);
+p = buf + v.in_pos;
+
+uint16_t type     = (uint16_t)v.atoz[0];
+uint32_t ttl      = (uint32_t)v.atoz[2];
+uint16_t rdlength = (uint16_t)v.atoz[3];
+```
+
+---
+
 ## Extending to a new protocol
 
 Adding a new message type requires:

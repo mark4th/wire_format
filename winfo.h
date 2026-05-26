@@ -26,17 +26,29 @@ typedef struct
     int64_t  atoz[WI_MAX_VARS];         // dynamic variables a-z
     int64_t  AtoZ[WI_MAX_VARS];         // dynamic variables A-Z
 
-    uint8_t *out;                       // output buffer
-    size_t   out_size;                  // output buffer capacity
-    size_t   out_len;                   // bytes written so far
+    uint8_t       *out;                 // output buffer (encode)
+    size_t         out_size;            // output buffer capacity
+    size_t         out_len;             // bytes written so far
+
+    const uint8_t *in;                  // input buffer (decode)
+    size_t         in_size;             // input buffer capacity
+    size_t         in_pos;              // bytes consumed so far
 
     int      digits;                    // for %2d / %3d
 } wi_vars_t;
 
 // -----------------------------------------------------------------------
 
+// encode: set output buffer and parameters, then call wi_parse()
 void    wi_init(wi_vars_t *v, uint8_t *buf, size_t bufsize,
                 int64_t *params, int nparams);
+
+// decode: set input buffer and parameters, then call wi_parse()
+// in_pos advances with each call; multiple wi_parse() calls continue
+// from where the previous left off.  Results land in v->atoz[].
+void    wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
+                       int64_t *params, int nparams);
+
 size_t  wi_parse(wi_vars_t *v, const char *fmt);
 
 // -----------------------------------------------------------------------

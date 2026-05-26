@@ -36,9 +36,19 @@
 //   p2 = encoded QNAME length   (size_t)
 //   p3 = QTYPE                  (uint16)
 //   p4 = QCLASS                 (uint16)
+//
+// wi_dns_resp_hdr  (decode):
+//   reads 6 x uint16; results in atoz[]: a=txid b=flags c=qdcount
+//   d=ancount e=nscount f=arcount
+//
+// wi_dns_rr  (decode):
+//   reads RR fixed fields after name; results in atoz[]:
+//   a=type b=class c=ttl(uint32) d=rdlength
 
 extern const char wi_dns_header[];
 extern const char wi_dns_question[];
+extern const char wi_dns_resp_hdr[];
+extern const char wi_dns_rr[];
 
 // -----------------------------------------------------------------------
 

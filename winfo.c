@@ -29,6 +29,12 @@ static void b_emit(uint8_t byte)
     wi->out[wi->out_len++] = byte;
 }
 
+static uint8_t b_read(void)
+{
+    assert(wi->in_pos < wi->in_size);
+    return wi->in[wi->in_pos++];
+}
+
 // -----------------------------------------------------------------------
 // RPN stack
 
@@ -181,6 +187,27 @@ static void _bW(void)
     b_emit((uint8_t)(v & 0xff));
 }
 
+// %B  read 1 byte from input → push
+static void _rB(void) { fs_push(b_read()); }
+
+// %S  read 2 bytes big-endian → push as uint16
+static void _rS(void)
+{
+    uint16_t v = (uint16_t)b_read() << 8;
+    v |= b_read();
+    fs_push(v);
+}
+
+// %L  read 4 bytes big-endian → push as uint32
+static void _rL(void)
+{
+    uint32_t v = (uint32_t)b_read() << 24;
+    v |= (uint32_t)b_read() << 16;
+    v |= (uint32_t)b_read() << 8;
+    v |= b_read();
+    fs_push(v);
+}
+
 // %r  emit raw buffer: TOS = length, next = pointer
 static void _r(void)
 {
@@ -207,6 +234,7 @@ static const wi_op_t ops[] =
 {
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
     { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
+    { 'B', _rB      }, { 'S', _rS     }, { 'L', _rL     },
     { '&', _and     }, { 'A', _andl   }, { '|', _or     },
     { 'O', _orl     }, { '^', _xor    }, { '~', _not    },
     { '!', _notl    }, { '+', _plus   }, { '-', _minus   },
@@ -262,6 +290,22 @@ void wi_init(wi_vars_t *v, uint8_t *buf, size_t bufsize,
 
     v->out      = buf;
     v->out_size = bufsize;
+
+    if (params && nparams > 0)
+    {
+        if (nparams > WI_MAX_PARAMS)
+            nparams = WI_MAX_PARAMS;
+        memcpy(v->params, params, (size_t)nparams * sizeof(int64_t));
+    }
+}
+
+void wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
+                    int64_t *params, int nparams)
+{
+    memset(v, 0, sizeof(*v));
+
+    v->in      = in;
+    v->in_size = in_size;
 
     if (params && nparams > 0)
     {

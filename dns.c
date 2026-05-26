@@ -93,16 +93,32 @@ size_t dns_build_query(const char *name, uint16_t qtype, uint16_t txid,
 }
 
 // -----------------------------------------------------------------------
-// minimal response parser — prints A record addresses
+// winfo format strings for DNS response decoding
+//
+// wi_dns_resp_hdr: decode 6 x uint16 header fields
+//   results in atoz[]: a=txid b=flags c=qdcount d=ancount e=nscount f=arcount
 
-static uint16_t r16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
-static uint32_t r32(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
-}
+const char wi_dns_resp_hdr[] =
+    "%S%Pa"         // txid    -> a
+    "%S%Pb"         // flags   -> b
+    "%S%Pc"         // qdcount -> c
+    "%S%Pd"         // ancount -> d
+    "%S%Pe"         // nscount -> e
+    "%S%Pf";        // arcount -> f
 
-// skip a name field; handles compression pointers; returns next byte after name
+// wi_dns_rr: decode RR fixed fields (call after name has been skipped)
+//   results in atoz[]: a=type b=class c=ttl(uint32) d=rdlength
+
+const char wi_dns_rr[] =
+    "%S%Pa"         // type     -> a
+    "%S%Pb"         // class    -> b
+    "%L%Pc"         // ttl      -> c
+    "%S%Pd";        // rdlength -> d
+
+// -----------------------------------------------------------------------
+// skip a DNS name field; handles compression pointers
+// returns pointer to first byte after the name
+
 static const uint8_t *skip_name(const uint8_t *p)
 {
     while (*p)
@@ -122,13 +138,18 @@ void dns_print_response(const uint8_t *buf, size_t len)
         return;
     }
 
-    uint16_t flags   = r16(buf + 2);
-    uint16_t qdcount = r16(buf + 4);
-    uint16_t ancount = r16(buf + 6);
+    wi_vars_t v;
+    wi_decode_init(&v, buf, len, NULL, 0);
+    wi_parse(&v, wi_dns_resp_hdr);
+
+    uint16_t txid    = (uint16_t)v.atoz[0];   // a
+    uint16_t flags   = (uint16_t)v.atoz[1];   // b
+    uint16_t qdcount = (uint16_t)v.atoz[2];   // c
+    uint16_t ancount = (uint16_t)v.atoz[3];   // d
     uint16_t rcode   = flags & 0x000f;
 
     printf("txid=0x%04x  flags=0x%04x  questions=%u  answers=%u\n",
-           r16(buf), flags, qdcount, ancount);
+           txid, flags, qdcount, ancount);
 
     if (rcode)
     {
@@ -136,25 +157,28 @@ void dns_print_response(const uint8_t *buf, size_t len)
         return;
     }
 
-    const uint8_t *p = buf + DNS_HDR_LEN;
-
-    // skip question section
+    // skip question section (names are variable-length; not suitable for winfo)
+    const uint8_t *p = buf + v.in_pos;
     uint16_t i;
+
     for (i = 0; i < qdcount && (size_t)(p - buf) < len; i++)
     {
         p = skip_name(p);
         p += 4;                 // QTYPE + QCLASS
     }
 
-    // parse answer section
+    // decode answer records
     for (i = 0; i < ancount && (size_t)(p - buf) < len; i++)
     {
         p = skip_name(p);
 
-        uint16_t type     = r16(p);     p += 2;
-        /* class */                      p += 2;
-        uint32_t ttl      = r32(p);     p += 4;
-        uint16_t rdlength = r16(p);     p += 2;
+        v.in_pos = (size_t)(p - buf);
+        wi_parse(&v, wi_dns_rr);
+        p = buf + v.in_pos;
+
+        uint16_t type     = (uint16_t)v.atoz[0];   // a
+        uint32_t ttl      = (uint32_t)v.atoz[2];   // c
+        uint16_t rdlength = (uint16_t)v.atoz[3];   // d
 
         if (type == DNS_QTYPE_A && rdlength == 4)
         {
