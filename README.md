@@ -1,17 +1,17 @@
-# winfo — wire format info parser
+# wire_format — wire format info parser
 
 ## What it is
 
-winfo is a compact, data-driven binary protocol encoder built around a
-format string interpreter.  Each message type in a protocol is described
-by a short format string literal baked into the executable.  A single
-generic parser walks the string and emits the correct wire bytes.  No
-special handler function is needed per message type.
+wire_format is a compact, data-driven binary protocol encoder built around a
+format string interpreter.  Each message type in a protocol is described by
+a short format string literal baked into the executable.  A single generic
+parser walks the string and emits the correct wire bytes.  No special
+handler function is needed per message type.
 
-The approach is directly inspired by terminfo, the UNIX terminal
-capability database, which uses format strings and an RPN stack to
-describe how to construct terminal escape sequences.  winfo takes the
-same mechanism and applies it to arbitrary binary protocols.
+The approach is directly inspired by terminfo, the UNIX terminal capability
+database, which uses format strings and an RPN stack to describe how to
+construct terminal escape sequences.  wire_format takes the same mechanism
+and applies it to arbitrary binary protocols.
 
 ---
 
@@ -26,10 +26,10 @@ but has a real cost:
 - Bugs in encoding logic tend to be duplicated across similar message
   types because each is hand-rolled independently.
 
-winfo inverts this.  The parser is written once.  Adding a new message
-type means adding a format string — a string literal that describes the
-wire layout.  No new code path, no new function, no new test surface for
-the encoding machinery itself.
+wire_format inverts this.  The parser is written once.  Adding a new message
+type means adding a format string — a string literal that describes the wire
+layout.  No new code path, no new function, no new test surface for the
+encoding machinery itself.
 
 This matters most in embedded systems and protocol implementations where
 message types accumulate over time.  A growing protocol does not require
@@ -42,10 +42,10 @@ format strings.
 
 ### The RPN stack
 
-winfo uses a small integer stack (RPN, reverse Polish notation — the
-same model as Forth and the original terminfo).  Format strings push
-values, manipulate them, and then emit bytes.  This avoids the need for
-a recursive-descent expression parser while still supporting arithmetic,
+wire_format uses a small integer stack (RPN, reverse Polish notation — the
+same model as Forth and the original terminfo).  Format strings push values,
+manipulate them, and then emit bytes.  This avoids the need for a
+recursive-descent expression parser while still supporting arithmetic,
 bitwise logic, and conditional branching.
 
 ### Parameters
@@ -99,9 +99,9 @@ The `%e` else clause is optional.
 
 DNS (RFC 1035) was chosen as the demonstration protocol because it is
 well-known, fully specified, binary, and small enough to implement
-completely in a short session.  It exercises the key features of winfo:
-fixed-width big-endian fields, literal constants, and raw buffer
-emission for variable-length data.
+completely in a short session.  It exercises the key features of
+wire_format: fixed-width big-endian fields, literal constants, and raw
+buffer emission for variable-length data.
 
 ### DNS query header
 
@@ -111,7 +111,7 @@ A DNS query header is 6 × uint16 fields in big-endian order:
 ID | flags | QDCOUNT | ANCOUNT | NSCOUNT | ARCOUNT
 ```
 
-The winfo format string for this is:
+The wire_format format string for this is:
 
 ```c
 const char wi_dns_header[] =
@@ -144,7 +144,7 @@ const char wi_dns_question[] =
 
 ```
 make
-./winfo_demo [hostname]
+./dns_demo [hostname]
 ```
 
 Default hostname is `example.com`.  Queries Google's public resolver
@@ -161,10 +161,10 @@ txid=0xa0ac  flags=0x8180  questions=1  answers=2
 
 ## Decoding incoming messages
 
-winfo can also walk an incoming buffer and extract field values.  The same
-RPN stack, variables, and conditional logic are available; the difference
-is that `%B`, `%S`, and `%L` *read* bytes from an input buffer and push
-them onto the stack rather than popping bytes and writing them out.
+wire_format can also walk an incoming buffer and extract field values.  The
+same RPN stack, variables, and conditional logic are available; the
+difference is that `%B`, `%S`, and `%L` *read* bytes from an input buffer
+and push them onto the stack rather than popping bytes and writing them out.
 
 ### Decode specifiers
 
@@ -231,6 +231,60 @@ uint16_t rdlength = (uint16_t)v.atoz[3];
 
 ---
 
+## Bit fields
+
+Not all binary protocols are byte-oriented.  IP headers, DNS flags, and many
+embedded protocols pack multiple fields into individual bytes using specific
+bit positions.  wire_format supports this with three specifiers that operate
+on a per-byte bit accumulator.
+
+### Bit field specifiers
+
+| Specifier | Effect |
+|-----------|--------|
+| `%x`      | encode: pop position, width, value → pack field into accumulator |
+| `%X`      | decode: pop position, width → extract field from accumulator → push |
+| `%f`      | encode: emit accumulator byte and reset; decode: discard current accumulator byte |
+
+Position is measured from the LSB, so positioning is a left-shift
+operation.  Width is the number of bits.  Both are popped from the stack,
+making them fully computable via the RPN arithmetic operators.
+
+### Encode example — IP header first byte
+
+The first byte of an IPv4 header packs two 4-bit fields: version (bits
+7:4) and IHL (bits 3:0).
+
+```c
+// params: p1 = version (4), p2 = IHL (5)  →  wire byte = 0x45
+const char wi_ip_first_byte[] =
+    "%p1%{4}%{4}%x"   // version: width=4, position=4
+    "%p2%{4}%{0}%x"   // IHL:     width=4, position=0
+    "%f";              // emit the composed byte
+```
+
+### Decode example — same byte
+
+```c
+const char wi_ip_first_byte_dec[] =
+    "%{4}%{4}%X%Pa"   // extract version (width=4, pos=4) → a
+    "%{4}%{0}%X%Pb"   // extract IHL     (width=4, pos=0) → b
+    "%f";              // advance past the byte
+```
+
+After parsing, `v.atoz[0]` holds the version and `v.atoz[1]` holds IHL.
+
+### Notes
+
+- `%x` and `%X` both auto-load a byte into the accumulator on first use;
+  `%f` flushes (encode) or advances (decode) the accumulator boundary.
+- Fields wider than 8 bits that straddle byte boundaries must be split
+  across two `%x`/`%X` operations with appropriate masking.
+- The stack order is `value`, `width`, `position` — push the value first,
+  then width, then position (TOS).
+
+---
+
 ## Extending to a new protocol
 
 Adding a new message type requires:
@@ -243,15 +297,15 @@ No new parser code.  No new encoding function.  The format string is
 both the specification and the implementation of the message layout.
 
 If the format string language lacks a specifier needed by the protocol,
-add one operator to the dispatch table in `winfo.c`.  All existing
+add one operator to the dispatch table in `wire_format.c`.  All existing
 format strings continue to work unchanged.
 
 ---
 
 ## Extending the format string language
 
-The dispatch table in `winfo.c` is a flat array of `{ character, function }`
-pairs.  Adding a new specifier is two steps:
+The dispatch table in `wire_format.c` is a flat array of `{ character,
+function }` pairs.  Adding a new specifier is two steps:
 
 1. Write a static function that operates on the stack or calls `b_emit()`.
 2. Add one entry to the `ops[]` table.
@@ -276,7 +330,7 @@ All existing format strings are unaffected.
 
 ## Applicability
 
-winfo fits protocols where messages have a fixed or semi-fixed binary
+wire_format fits protocols where messages have a fixed or semi-fixed binary
 layout: DNS, DHCP, custom embedded protocols, sensor data frames, game
 network protocols, instrumentation buses.  It is less suited to
 text-based protocols (HTTP/1.1) or highly dynamic layouts where the
@@ -290,13 +344,13 @@ stack-allocated.
 
 ## Files
 
-| File       | Purpose |
-|------------|---------|
-| `winfo.h`  | public API and types |
-| `winfo.c`  | format string parser |
-| `dns.h`    | DNS constants and format string declarations |
-| `dns.c`    | DNS query construction and response parsing |
-| `demo.c`   | command-line demo |
+| File            | Purpose |
+|-----------------|---------|
+| `wire_format.h` | public API and types |
+| `wire_format.c` | format string parser |
+| `dns.h`         | DNS constants and format string declarations |
+| `dns.c`         | DNS query construction and response parsing |
+| `dns_demo.c`    | command-line demo |
 
 ---
 

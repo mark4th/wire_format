@@ -3,9 +3,9 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -g -O2
 
-SRCS    = winfo.c dns.c demo.c
+SRCS    = wire_format.c dns.c dns_demo.c
 OBJS    = $(SRCS:.c=.o)
-TARGET  = winfo_demo
+TARGET  = dns_demo
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^

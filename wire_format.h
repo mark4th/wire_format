@@ -35,6 +35,10 @@ typedef struct
     size_t         in_pos;              // bytes consumed so far
 
     int      digits;                    // for %2d / %3d
+
+    uint8_t  bit_acc;                   // encode bit accumulator
+    uint8_t  in_acc;                    // decode bit accumulator
+    uint8_t  in_loaded;                 // decode: byte loaded into in_acc
 } wi_vars_t;
 
 // -----------------------------------------------------------------------

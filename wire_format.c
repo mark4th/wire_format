@@ -9,6 +9,11 @@
 //   %W  - emit 4 bytes big-endian (uint32)
 // -----------------------------------------------------------------------
 
+claude i renamed the github repo to wire_format - change any reference to
+winfo to wire_format and rename the demo C files to dns_demo.c etc.
+
+maybe then we can push?  oh.  delete this message first :)
+
 #include <assert.h>
 #include <inttypes.h>
 #include <stdint.h>
@@ -208,6 +213,47 @@ static void _rL(void)
     fs_push(v);
 }
 
+// %x  encode bit field: pop position, width, value → bit_acc |= (value & mask) << position
+static void _bx(void)
+{
+    int      pos   = (int)fs_pop();
+    int      width = (int)fs_pop();
+    uint8_t  val   = (uint8_t)fs_pop();
+    uint8_t  mask  = (uint8_t)((1u << width) - 1u);
+
+    wi->bit_acc |= (val & mask) << pos;
+}
+
+// %X  decode bit field: pop position, width → extract from in_acc → push
+static void _bX(void)
+{
+    int     pos   = (int)fs_pop();
+    int     width = (int)fs_pop();
+    uint8_t mask  = (uint8_t)((1u << width) - 1u);
+
+    if (!wi->in_loaded)
+    {
+        wi->in_acc    = b_read();
+        wi->in_loaded = 1;
+    }
+
+    fs_push((wi->in_acc >> pos) & mask);
+}
+
+// %f  flush: encode emits bit_acc and resets; decode discards current in_acc byte
+static void _f(void)
+{
+    if (wi->out)
+    {
+        b_emit(wi->bit_acc);
+        wi->bit_acc = 0;
+    }
+    else
+    {
+        wi->in_loaded = 0;
+    }
+}
+
 // %r  emit raw buffer: TOS = length, next = pointer
 static void _r(void)
 {
@@ -235,6 +281,7 @@ static const wi_op_t ops[] =
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
     { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
     { 'B', _rB      }, { 'S', _rS     }, { 'L', _rL     },
+    { 'x', _bx      }, { 'X', _bX     }, { 'f', _f      },
     { '&', _and     }, { 'A', _andl   }, { '|', _or     },
     { 'O', _orl     }, { '^', _xor    }, { '~', _not    },
     { '!', _notl    }, { '+', _plus   }, { '-', _minus   },
