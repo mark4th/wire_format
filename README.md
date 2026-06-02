@@ -1,4 +1,4 @@
-# wire_format — wire format info parser
+# wire format info parser
 
 ## What it is
 
