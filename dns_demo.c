@@ -1,4 +1,4 @@
-// demo.c  - winfo DNS query demo
+// demo.c  - wire_format DNS query demo
 // -----------------------------------------------------------------------
 
 #include <stdio.h>
@@ -11,7 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "winfo.h"
+#include "wire_format.h"
 #include "dns.h"
 
 // -----------------------------------------------------------------------

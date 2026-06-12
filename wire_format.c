@@ -1,4 +1,4 @@
-// winfo.c  - wire format info parser
+// wire_format.c  - wire format info parser
 // -----------------------------------------------------------------------
 // Derived from uCurses terminfo format string parser.
 // RPN stack, arithmetic/logic/conditionals, binary byte emission.
@@ -9,18 +9,13 @@
 //   %W  - emit 4 bytes big-endian (uint32)
 // -----------------------------------------------------------------------
 
-claude i renamed the github repo to wire_format - change any reference to
-winfo to wire_format and rename the demo C files to dns_demo.c etc.
-
-maybe then we can push?  oh.  delete this message first :)
-
 #include <assert.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
-#include "winfo.h"
+#include "wire_format.h"
 
 // -----------------------------------------------------------------------
 

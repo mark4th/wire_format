@@ -1,8 +1,8 @@
-// winfo.h  - wire format info parser
+// wire_format.h  - wire format info parser
 // -----------------------------------------------------------------------
 
-#ifndef WINFO_H
-#define WINFO_H
+#ifndef WIRE_FORMAT_H
+#define WIRE_FORMAT_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -57,6 +57,6 @@ size_t  wi_parse(wi_vars_t *v, const char *fmt);
 
 // -----------------------------------------------------------------------
 
-#endif // WINFO_H
+#endif // WIRE_FORMAT_H
 
 // =======================================================================

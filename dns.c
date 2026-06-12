@@ -1,15 +1,15 @@
-// dns.c  - DNS query construction and response parsing via winfo
+// dns.c  - DNS query construction and response parsing via wire_format
 // -----------------------------------------------------------------------
 
 #include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
 
-#include "winfo.h"
+#include "wire_format.h"
 #include "dns.h"
 
 // -----------------------------------------------------------------------
-// winfo format strings for DNS message construction
+// wire_format format strings for DNS message construction
 //
 // Header: 6 x uint16 big-endian
 //   ID | flags | QDCOUNT | ANCOUNT | NSCOUNT | ARCOUNT
@@ -93,7 +93,7 @@ size_t dns_build_query(const char *name, uint16_t qtype, uint16_t txid,
 }
 
 // -----------------------------------------------------------------------
-// winfo format strings for DNS response decoding
+// wire_format format strings for DNS response decoding
 //
 // wi_dns_resp_hdr: decode 6 x uint16 header fields
 //   results in atoz[]: a=txid b=flags c=qdcount d=ancount e=nscount f=arcount
@@ -157,7 +157,7 @@ void dns_print_response(const uint8_t *buf, size_t len)
         return;
     }
 
-    // skip question section (names are variable-length; not suitable for winfo)
+    // skip question section (names are variable-length; not suitable for wire_format)
     const uint8_t *p = buf + v.in_pos;
     uint16_t i;
 

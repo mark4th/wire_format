@@ -1,4 +1,4 @@
-// dns.h  - DNS protocol definitions and format strings for winfo demo
+// dns.h  - DNS protocol definitions and format strings for wire_format demo
 // -----------------------------------------------------------------------
 
 #ifndef DNS_H
@@ -23,7 +23,7 @@
 #define DNS_HDR_LEN     12      // fixed header size
 
 // -----------------------------------------------------------------------
-// winfo format strings
+// wire_format format strings
 //
 // wi_dns_header:
 //   p1 = transaction ID  (uint16)
