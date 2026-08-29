@@ -153,7 +153,11 @@ format and the caller re-checks the buffer between records.
 
 #### Nesting depth
 
-`WI_CALL_DEPTH` (8) bounds the call stack.  Each frame is a return
+`WI_CALL_DEPTH` (default 8) bounds the call stack, and is meant to be
+set for the protocol using it — `-DWI_CALL_DEPTH=n`.  The right value is
+how deep your own message table nests, which `wi_set_formats()` measures
+and enforces; the default is a starting point, not a limit the library
+can know for you.  Each frame is a return
 address, the caller's index, the called format's start and a loop
 counter — 28 bytes, so eight frames is 224.
 

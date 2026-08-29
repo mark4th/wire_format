@@ -24,13 +24,21 @@
 // (the ordering rule makes it a pre-sorted DAG) and refuses only a table
 // that really would overflow this.
 
+// ⚠ OVERRIDE THIS FOR YOUR PROTOCOL: -DWI_CALL_DEPTH=n.  the right value
+// is how deep YOUR message table actually nests, which wi_set_formats()
+// measures and enforces - not a number this header can know.
+
+#ifndef WI_CALL_DEPTH
 #define WI_CALL_DEPTH   8
+#endif
 
 // the largest format table wi_set_formats() will look at.  it bounds a
 // scratch array there, not the protocol - a table this big may still
 // only nest two or three deep, and that is what is actually checked.
 
+#ifndef WI_MAX_FORMATS
 #define WI_MAX_FORMATS  64
+#endif
 
 // -----------------------------------------------------------------------
 
