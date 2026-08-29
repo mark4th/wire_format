@@ -54,6 +54,13 @@ The caller supplies an array of `int64_t` parameters before parsing.
 Format string `%p1` pushes parameter 1 onto the stack, `%p2` pushes
 parameter 2, and so on.
 
+⚠ **Only `%p1` through `%p9` exist.**  The parser reads a single
+character after the `p` and masks it, so `%p10` is `%p1` followed by a
+literal `0` that gets emitted as a byte.  Nothing warns; the message just
+comes out wrong.  A message needing more than nine parameters is split
+into two `wi_parse()` calls on the same `wi_vars_t`, which is what the
+DNS encoder does for header + question.
+
 ### Emit specifiers
 
 | Specifier | Effect |
@@ -63,6 +70,7 @@ parameter 2, and so on.
 | `%w`      | emit 2 bytes big-endian (uint16) |
 | `%W`      | emit 4 bytes big-endian (uint32) |
 | `%r`      | emit raw buffer: TOS = length, next = pointer |
+| `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
 
 ### Arithmetic and logic
 
@@ -72,6 +80,72 @@ parameter 2, and so on.
 | `%&` `%\|` `%^` `%~`     | bitwise AND/OR/XOR/NOT |
 | `%A` `%O` `%!`           | logical AND/OR/NOT |
 | `%=` `%>` `%<`           | comparisons (push 0 or 1) |
+
+### Message nesting — the format string call
+
+`%[n]` embeds format string *n* of a caller-supplied table into the format
+being parsed.  It is a subroutine call: the rest of the current string is
+pushed, parsing continues inside the called one, and running off the end
+of it returns to where the call was made.
+
+```c
+static const char f_coord[] = "%p1%w%p2%w";      // a reusable sub-message
+static const char *table[]  = { f_coord };
+
+wi_init(&v, buf, sizeof buf, params, 2);
+wi_set_formats(&v, table, 1);                    // ⚠ AFTER wi_init
+wi_parse(&v, "%{170}%c%[0]%{187}%c");            // AA <coord> BB
+```
+
+A message that contains another message is written once and referenced,
+rather than copied into every format string that needs it.
+
+⚠ `wi_set_formats()` must be called **after** `wi_init()` or
+`wi_decode_init()` — both `memset` the whole struct, so setting the table
+first silently loses it.
+
+⚠ The called format shares the caller's parameters and its `a`–`z`
+variables.  Sharing parameters is deliberate: a sub-format reads the same
+array.  On **decode** it means a callee storing into `%Pa` overwrites the
+caller's `a` — give parent and child disjoint letters, or read the
+child's values out before calling again.
+
+#### No forward references
+
+**A format may only call a format with a strictly lower index.**
+
+That single rule is what makes recursion impossible.  Every call
+decreases the index, the index cannot go below zero, so a call chain
+always terminates — a cyclic table is not something that runs badly, it
+is something that **cannot be written**.
+
+It covers the case that is invisible in any single format string, a cycle
+that exists only in the table:
+
+```c
+// neither of these looks wrong on its own
+static const char f_ping[] = "%{2}%c%[5]";   // index 4 calls 5  ← refused
+static const char f_pong[] = "%{3}%c%[4]";   // index 5 calls 4  ← fine
+```
+
+And it covers self-reference for free — `%[3]` inside format 3 is a cycle
+of length one, which is why the comparison is *strictly* less rather than
+"not greater".
+
+The string passed to `wi_parse()` is not in the table and ranks above all
+of it, so a top-level message may call anything.
+
+`WI_CALL_DEPTH` (8) remains as a backstop on stack usage for large
+tables; with the ordering rule it should never be the thing that stops a
+call chain.
+
+Every failure in `%[n]` is silent by design — a bad index, a forward
+reference, a `NULL` slot, no table at all, or exceeding the depth —
+because a wire encoder that aborts mid-message leaves a half-written
+buffer, which is worse than a short one that the length field already
+describes.
+
+---
 
 ### Literals
 

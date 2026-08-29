@@ -1,2 +1,4 @@
 *.o
 dns_demo
+call_test
+*.d

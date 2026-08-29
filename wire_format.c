@@ -7,6 +7,8 @@
 //   %b  - emit 1 byte  (low byte of TOS)
 //   %w  - emit 2 bytes big-endian (uint16)
 //   %W  - emit 4 bytes big-endian (uint32)
+//   %[n] - call format n of the caller supplied table (wi_set_formats),
+//          strictly lower index only, so a cycle cannot be written
 // -----------------------------------------------------------------------
 
 #include <assert.h>
@@ -271,6 +273,69 @@ typedef struct
     wi_fn_t  fn;
 } wi_op_t;
 
+// -----------------------------------------------------------------------
+// %[n]  - a FORMAT STRING CALL.
+//
+// n indexes the table given to wi_set_formats().  the rest of the
+// current string is pushed and parsing continues inside the called one;
+// wi_parse()'s loop pops back when it runs off the end.
+//
+// ★★ A FORMAT MAY ONLY CALL A LOWER INDEX.  every call strictly
+// decreases cur_fmt and the index cannot go below zero, so the chain
+// always terminates - a cyclic table is not something that runs badly,
+// it is something that cannot be written.  the top level string is not
+// in the table and ranks above all of it.
+//
+// ⚠ every failure here is silent BY DESIGN - a bad index, a forward
+// reference, no table, or nesting past WI_CALL_DEPTH skips the call and
+// carries on.  a wire encoder that aborts mid message leaves a half
+// written buffer, which is worse than a short one the length field
+// already describes.
+
+static void _call(void)
+{
+    int n = 0;
+    int digits = 0;
+
+    while ((*wi->f_str >= '0') && (*wi->f_str <= '9') && (digits < 4))
+    {
+        n = (n * 10) + (*wi->f_str++ - '0');
+        digits++;
+    }
+
+    if (*wi->f_str == ']')
+    {
+        wi->f_str++;
+    }
+
+    if ((digits == 0) || (wi->fmts == NULL) ||
+        (n < 0) || (n >= wi->nfmts) || (wi->fmts[n] == NULL))
+    {
+        return;
+    }
+
+    // ★ the rule.  strictly less - equal would be a self call.
+
+    if (n >= wi->cur_fmt)
+    {
+        return;
+    }
+
+    if (wi->rsp >= WI_CALL_DEPTH)
+    {
+        return;
+    }
+
+    wi->rstack[wi->rsp] = wi->f_str;
+    wi->rfmt[wi->rsp]   = wi->cur_fmt;
+    wi->rsp++;
+
+    wi->cur_fmt = n;
+    wi->f_str   = (const uint8_t *)wi->fmts[n];
+}
+
+// -----------------------------------------------------------------------
+
 static const wi_op_t ops[] =
 {
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
@@ -284,7 +349,7 @@ static const wi_op_t ops[] =
     { '=', _equals  }, { '>', _greater }, { '<', _less   },
     { 0x27, _tick   }, { '{', _brace  }, { 'P', _P      },
     { 'g', _g       }, { '?', NULL    }, { 't', _t      },
-    { 'e', _e       }, { ';', NULL    },
+    { 'e', _e       }, { ';', NULL    }, { '[', _call   },
 };
 
 #define OPS_COUNT  (sizeof(ops) / sizeof(ops[0]))
@@ -364,9 +429,31 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
     wi = v;
     wi->f_str  = (const uint8_t *)fmt;
     wi->out_len = 0;
+    wi->rsp     = 0;
 
-    while (*wi->f_str)
+    // the top level string is not in the table, so it outranks all of it
+
+    wi->cur_fmt = wi->nfmts;
+
+    for (;;)
     {
+        // ⚠ end of string is a RETURN, not the end of the parse, unless
+        // there is nothing to return to.  this is the only reason %[n]
+        // needs no matching terminator in the called format.
+
+        if (*wi->f_str == 0)
+        {
+            if (wi->rsp == 0)
+            {
+                break;
+            }
+
+            wi->rsp--;
+            wi->f_str   = wi->rstack[wi->rsp];
+            wi->cur_fmt = wi->rfmt[wi->rsp];
+            continue;
+        }
+
         int c1 = *wi->f_str++;
 
         if (c1 == '%')
@@ -376,6 +463,14 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
     }
 
     return wi->out_len;
+}
+
+// -----------------------------------------------------------------------
+
+void wi_set_formats(wi_vars_t *v, const char **fmts, int nfmts)
+{
+    v->fmts  = fmts;
+    v->nfmts = nfmts;
 }
 
 // =======================================================================
