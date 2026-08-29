@@ -9,6 +9,7 @@
 //   %W  - emit 4 bytes big-endian (uint32)
 //   %[n] - call format n of the caller supplied table (wi_set_formats),
 //          strictly lower index only, so a cycle cannot be written
+//   %:   - pop a repeat count for the following %[n]
 // -----------------------------------------------------------------------
 
 #include <assert.h>
@@ -25,15 +26,29 @@ static wi_vars_t *wi;           // current parse context
 
 // -----------------------------------------------------------------------
 
+// ⚠ NOT assert().  with asserts on this aborted the process and with
+// -DNDEBUG it wrote past the buffer; a counted loop makes both reachable
+// from a bad count.  overrun stops the parse and the caller checks it.
+
 static void b_emit(uint8_t byte)
 {
-    assert(wi->out_len < wi->out_size);
+    if (wi->out_len >= wi->out_size)
+    {
+        wi->overrun = 1;
+        return;
+    }
+
     wi->out[wi->out_len++] = byte;
 }
 
 static uint8_t b_read(void)
 {
-    assert(wi->in_pos < wi->in_size);
+    if (wi->in_pos >= wi->in_size)
+    {
+        wi->overrun = 1;
+        return 0;
+    }
+
     return wi->in[wi->in_pos++];
 }
 
@@ -292,10 +307,45 @@ typedef struct
 // written buffer, which is worse than a short one the length field
 // already describes.
 
+// -----------------------------------------------------------------------
+// %:  - pop a repeat count for the NEXT %[n].
+//
+// ★ the count comes off the RPN stack rather than being a digit in the
+// string, so it is not limited to 0-9 and can be computed:
+//
+//      %{3}%:%[0]        three times
+//      %p1%:%[0]         as many as the caller passed
+//
+// ⚠ and zero works, because the count is known BEFORE the call rather
+// than after - %[n] simply does not happen.  a count baked in at the end
+// of a loop body could only ever give do-while.
+//
+// ⚠ it arms the NEXT %[n] in this parse, however far ahead that is -
+// not only an immediately adjacent one - so a count can be computed,
+// a header emitted, and then the call made.  every %[n] clears it,
+// INCLUDING one that is refused, so a single %: arms exactly one call
+// and a stray one cannot leak past it.
+
+static void _colon(void)
+{
+    wi->pending = fs_pop();
+}
+
+// -----------------------------------------------------------------------
+
 static void _call(void)
 {
     int n = 0;
     int digits = 0;
+
+    // ⚠ take the repeat count FIRST, before any of the early returns
+    // below.  a call that is refused - bad index, forward reference,
+    // stack full - must still consume it, or the count silently arms
+    // whichever call comes next instead.
+
+    int64_t count = wi->pending;
+
+    wi->pending = 1;
 
     while ((*wi->f_str >= '0') && (*wi->f_str <= '9') && (digits < 4))
     {
@@ -323,10 +373,18 @@ static void _call(void)
 
     if (wi->rsp >= WI_CALL_DEPTH)
     {
-        return;
+        wi->overrun = 1;        // ⚠ loud.  wi_set_formats() should have
+        return;                 // caught this, so reaching it is a bug
+    }
+
+    if (count <= 0)
+    {
+        return;             // %{0}%:%[n] - the call does not happen
     }
 
     wi->rstack[wi->rsp] = wi->f_str;
+    wi->rstart[wi->rsp] = (const uint8_t *)wi->fmts[n];
+    wi->rleft[wi->rsp]  = count - 1;
     wi->rfmt[wi->rsp]   = wi->cur_fmt;
     wi->rsp++;
 
@@ -350,6 +408,7 @@ static const wi_op_t ops[] =
     { 0x27, _tick   }, { '{', _brace  }, { 'P', _P      },
     { 'g', _g       }, { '?', NULL    }, { 't', _t      },
     { 'e', _e       }, { ';', NULL    }, { '[', _call   },
+    { ':', _colon   },
 };
 
 #define OPS_COUNT  (sizeof(ops) / sizeof(ops[0]))
@@ -430,6 +489,8 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
     wi->f_str  = (const uint8_t *)fmt;
     wi->out_len = 0;
     wi->rsp     = 0;
+    wi->pending = 1;
+    wi->overrun = 0;
 
     // the top level string is not in the table, so it outranks all of it
 
@@ -441,11 +502,28 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
         // there is nothing to return to.  this is the only reason %[n]
         // needs no matching terminator in the called format.
 
+        if (wi->overrun)
+        {
+            break;
+        }
+
         if (*wi->f_str == 0)
         {
             if (wi->rsp == 0)
             {
                 break;
+            }
+
+            // ★ REPEAT BEFORE RETURN.  another iteration owed means
+            // restarting the called format rather than popping - which
+            // is the whole of the loop, on top of the call that was
+            // already there.
+
+            if (wi->rleft[wi->rsp - 1] > 0)
+            {
+                wi->rleft[wi->rsp - 1]--;
+                wi->f_str = wi->rstart[wi->rsp - 1];
+                continue;
             }
 
             wi->rsp--;
@@ -467,10 +545,124 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
 
 // -----------------------------------------------------------------------
 
-void wi_set_formats(wi_vars_t *v, const char **fmts, int nfmts)
+// -----------------------------------------------------------------------
+// find the next %[n] in a format string, or -1.  *pp is advanced.
+//
+// ⚠ it has to step OVER the other bracket-ish forms or it will find a
+// call inside them: %'[' pushes a literal bracket, %{12} holds digits,
+// and a %[n] already counted must not be seen twice.
+
+static int next_call(const char **pp)
 {
+    const char *p = *pp;
+
+    while (*p != '\0')
+    {
+        if (*p++ != '%') { continue; }
+
+        if (*p == '\0') { break; }
+
+        if (*p == '\'')                      // %'x' - literal char
+        {
+            p++;
+            if (*p) { p++; }
+            if (*p) { p++; }
+            continue;
+        }
+
+        if (*p == '{')                       // %{123} - literal number
+        {
+            while (*p && (*p != '}')) { p++; }
+            if (*p) { p++; }
+            continue;
+        }
+
+        if (*p == '[')                       // the one we want
+        {
+            int n = 0, d = 0;
+
+            p++;
+            while ((*p >= '0') && (*p <= '9') && (d < 4))
+            { n = (n * 10) + (*p++ - '0'); d++; }
+            if (*p == ']') { p++; }
+
+            *pp = p;
+            return (d == 0) ? -1 : n;
+        }
+
+        p++;                                 // any other specifier
+    }
+
+    *pp = p;
+    return -1;
+}
+
+// -----------------------------------------------------------------------
+// ★ THE ACTUAL NESTING DEPTH OF A TABLE, NOT ITS WORST CASE.
+//
+// an N entry table CAN nest N deep, but almost none do - refusing a
+// forty message protocol because it theoretically could is wrong.  the
+// no forward reference rule makes the exact answer cheap: a format only
+// ever calls a lower index, so the table is a DAG already sorted, and
+// one pass upward from zero gives every depth with no recursion and no
+// cycle check.
+//
+//     depth[k] = 1 + max(depth[j]) over every %[j] in format k
+
+static int table_depth(const char **fmts, int nfmts, int *depths)
+{
+    int k, j, deepest = 0;
+    const char *p;
+
+    for (k = 0; k != nfmts; k++)
+    {
+        depths[k] = 1;
+
+        if (fmts[k] == NULL) { continue; }
+
+        p = fmts[k];
+
+        for (;;)
+        {
+            j = next_call(&p);
+
+            if (j < 0) { break; }
+
+            // a forward or self reference never runs, so it never adds
+            // depth - it is refused at parse time by the same rule
+
+            if ((j >= k) || (j >= nfmts) || (fmts[j] == NULL)) { continue; }
+
+            if ((depths[j] + 1) > depths[k]) { depths[k] = depths[j] + 1; }
+        }
+
+        if (depths[k] > deepest) { deepest = depths[k]; }
+    }
+
+    return deepest;
+}
+
+// -----------------------------------------------------------------------
+
+int wi_set_formats(wi_vars_t *v, const char **fmts, int nfmts)
+{
+    int depths[WI_MAX_FORMATS];
+
+    if ((nfmts < 0) || (nfmts > WI_MAX_FORMATS)) { return -1; }
+
+    // ⚠ the top level string calls into the table, so the deepest chain
+    // costs one frame more than the table's own depth.
+
+    if ((fmts != NULL) && (nfmts > 0) &&
+        ((table_depth(fmts, nfmts, depths) + 1) > WI_CALL_DEPTH))
+    {
+        return -1;
+    }
+
     v->fmts  = fmts;
     v->nfmts = nfmts;
+
+    return 0;
 }
 
 // =======================================================================

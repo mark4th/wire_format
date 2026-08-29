@@ -71,6 +71,7 @@ DNS encoder does for header + question.
 | `%W`      | emit 4 bytes big-endian (uint32) |
 | `%r`      | emit raw buffer: TOS = length, next = pointer |
 | `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
+| `%:`      | pop a repeat count for the next `%[n]` |
 
 ### Arithmetic and logic
 
@@ -109,6 +110,69 @@ variables.  Sharing parameters is deliberate: a sub-format reads the same
 array.  On **decode** it means a callee storing into `%Pa` overwrites the
 caller's `a` — give parent and child disjoint letters, or read the
 child's values out before calling again.
+
+#### Repeating a call — `%:`
+
+`%:` pops a repeat count off the RPN stack and applies it to the next
+`%[n]`:
+
+```c
+"%{3}%:%[0]"          // call format 0 three times
+"%p1%:%[0]"           // ...as many times as the caller passed
+"%{2}%{3}%*%:%[0]"    // ...computed
+```
+
+Taking the count from the stack rather than baking a digit into the
+string means it is not limited to a single digit, and it can be computed
+from parameters or arithmetic.
+
+**Zero works.**  `%{0}%:%[0]` does not call at all — the count is known
+*before* the call rather than after, which a count placed at the end of a
+loop body could never manage; that shape can only give do-while.
+
+`%:` arms the *next* `%[n]`, not merely an adjacent one, so a count can
+be computed, a header emitted, and then the call made.  Every `%[n]`
+consumes it — **including one that is refused** — so a single `%:` arms
+exactly one call and a stray one cannot leak into a later.
+
+⚠ **Loop on encode; loop in C on decode.**  On encode the count is the
+sender's own data.  On decode it would come off the wire, and a format
+string cannot express "and stop if the input ran out" — the bound that
+belongs in the caller:
+
+```c
+for (i = 0; i < ancount && (size_t)(p - buf) < len; i++)
+    wi_parse(&v, wi_dns_rr);        // one fixed-size record
+```
+
+That is how the DNS decoder reads a variable number of answer records,
+and it is the right shape: the parser only ever runs a fixed-length
+format and the caller re-checks the buffer between records.
+
+---
+
+#### Nesting depth
+
+`WI_CALL_DEPTH` (8) bounds the call stack.  Each frame is a return
+address, the caller's index, the called format's start and a loop
+counter — 28 bytes, so eight frames is 224.
+
+★ **This is not the table size.**  An N-entry table *can* nest N deep,
+since every call strictly decreases the index — but almost none do, and
+refusing a forty-message protocol because it theoretically could would be
+wrong.  `wi_set_formats()` therefore measures the table's actual depth
+and refuses only a table that really would overflow the stack:
+
+```
+depth[k] = 1 + max(depth[j]) for every %[j] in format k
+```
+
+The ordering rule makes that a single pass upward from index 0 — the
+table is a DAG that is already topologically sorted, so there is no
+recursion and no cycle check to write.  A flat table of forty formats
+measures depth 1 and is accepted.
+
+---
 
 #### No forward references
 
@@ -229,6 +293,28 @@ querying example.com for A records (txid=0xa0ac, 29 bytes)
 txid=0xa0ac  flags=0x8180  questions=1  answers=2
   A  ttl=179     172.66.147.243
   A  ttl=179     104.20.23.154
+```
+
+---
+
+## Buffer overruns
+
+Reads and writes are bounds-checked and set `v.overrun`, which stops the
+parse.
+
+⚠ Both were `assert()` before `%:` existed.  With asserts enabled that
+aborts the process; under `-DNDEBUG` it walks off the end of the buffer.
+Neither is an option for a parser fed by a network, and a counted loop
+makes both reachable from a single bad count.
+
+The return value of `wi_parse()` is the length produced, which for a
+truncated encode is a short but entirely plausible number — **`v.overrun`
+is the only thing that says it is short because the buffer ran out.**
+
+```c
+wi_init(&v, buf, sizeof buf, params, n);
+len = wi_parse(&v, fmt);
+if (v.overrun) { /* buf was too small - do not transmit len bytes */ }
 ```
 
 ---

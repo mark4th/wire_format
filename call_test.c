@@ -104,6 +104,97 @@ int main(void)
         ck("in_pos", (long long)v.in_pos, 6);
     }
 
-    printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n] works");
+    // ---- %: the counted call -------------------------------------
+    printf("LOOP  %%:\n");
+    {
+        static const char f_byte[] = "%{88}%c";
+        static const char *t[] = { f_byte };
+
+        wi_init(&v, buf, sizeof buf, p, 2);
+        ck("set_formats", wi_set_formats(&v, t, 1), 0);
+        n = wi_parse(&v, "%{3}%:%[0]");
+        ck("three times", n, 3);
+        ck("  all 88", (buf[0]==88)&&(buf[1]==88)&&(buf[2]==88), 1);
+
+        wi_init(&v, buf, sizeof buf, p, 2);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%{0}%:%[0]");
+        ck("zero times", n, 0);
+
+        wi_init(&v, buf, sizeof buf, p, 2);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%[0]");
+        ck("no %%: means once", n, 1);
+
+        // the count is computable, not a baked in digit
+        p[0] = 5;
+        wi_init(&v, buf, sizeof buf, p, 1);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%p1%:%[0]");
+        ck("count from a param", n, 5);
+
+        // %: arms the NEXT call, not only an adjacent one
+        wi_init(&v, buf, sizeof buf, p, 2);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%{4}%:%{9}%c%[0]");   // 9, then 4 x 88
+        ck("arms the next call", n, 5);
+        ck("  9 then four 88", (buf[0]==9)&&(buf[1]==88)&&(buf[4]==88), 1);
+
+        // and a REFUSED call still consumes it - one %: arms one call
+        wi_init(&v, buf, sizeof buf, p, 2);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%{4}%:%[9]%[0]");     // %[9] out of range
+        ck("refused call eats it", n, 1);
+
+        // loop and call together: the loop body may itself call down
+        {
+            static const char f_in[]  = "%{1}%c";
+            static const char f_out[] = "%{2}%c%[0]";
+            static const char *t2[] = { f_in, f_out };
+            wi_init(&v, buf, sizeof buf, p, 2);
+            ck("depth 2 accepted", wi_set_formats(&v, t2, 2), 0);
+            n = wi_parse(&v, "%{3}%:%[1]");
+            ck("3 x (2 then 1)", n, 6);
+            ck("  2,1,2,1,2,1", (buf[0]==2)&&(buf[1]==1)&&(buf[4]==2)&&(buf[5]==1), 1);
+        }
+    }
+
+    // ---- buffer overrun is reported, not asserted -------------------
+    printf("OVERRUN\n");
+    {
+        static const char f_byte[] = "%{88}%c";
+        static const char *t[] = { f_byte };
+        uint8_t small[4];
+
+        wi_init(&v, small, sizeof small, p, 2);  wi_set_formats(&v, t, 1);
+        n = wi_parse(&v, "%{100}%:%[0]");
+        ck("stopped at buffer end", n, sizeof small);
+        ck("overrun flagged", v.overrun, 1);
+
+        uint8_t in2[2] = { 0, 7 };
+        wi_decode_init(&v, in2, sizeof in2, NULL, 0);
+        wi_parse(&v, "%S%Pa%S%Pb");         // asks for 4, has 2
+        ck("short input flagged", v.overrun, 1);
+    }
+
+    // ---- depth is MEASURED, not assumed -----------------------------
+    printf("TABLE DEPTH\n");
+    {
+        // 40 formats, none of which call anything: depth 1, must be fine
+        static const char flat[] = "%{1}%c";
+        const char *big[40];
+        for (int i = 0; i != 40; i++) { big[i] = flat; }
+        wi_init(&v, buf, sizeof buf, p, 2);
+        ck("40 flat formats accepted", wi_set_formats(&v, big, 40), 0);
+
+        // a genuine chain deeper than WI_CALL_DEPTH is refused
+        static char deep[WI_CALL_DEPTH + 2][16];
+        const char *chain[WI_CALL_DEPTH + 2];
+        chain[0] = "%{1}%c";
+        for (int i = 1; i != WI_CALL_DEPTH + 2; i++)
+        {
+            snprintf(deep[i], sizeof deep[i], "%%[%d]", i - 1);
+            chain[i] = deep[i];
+        }
+        wi_init(&v, buf, sizeof buf, p, 2);
+        ck("deep chain refused", wi_set_formats(&v, chain, WI_CALL_DEPTH + 2), -1);
+    }
+
+    printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n] and %: work");
     return fails != 0;
 }
