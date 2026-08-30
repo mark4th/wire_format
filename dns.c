@@ -26,7 +26,7 @@ const char wi_dns_header[] =
 //   p1 = pointer to encoded name, p2 = name length
 
 const char wi_dns_question[] =
-    "%p1%p2%r"      // encoded QNAME (raw bytes via pointer + length)
+    "%p1%p2%r1"     // encoded QNAME (bytes, via pointer + count)
     "%p3%w"         // QTYPE
     "%p4%w";        // QCLASS
 

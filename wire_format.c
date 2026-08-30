@@ -267,14 +267,54 @@ static void _f(void)
 }
 
 // %r  emit raw buffer: TOS = length, next = pointer
+// %rN  - emit a COUNT of N byte elements from a buffer, big endian.
+//
+//      %r1   bytes          (what %r used to be)
+//      %r2   uint16 array
+//      %r4   uint32 array
+//
+// ⚠ THE DIGIT IS REQUIRED.  bare %r would have to guess, and guessing
+// wrong means silently misreading a literal digit that followed it as
+// an element size.  Explicit, and it matches %p1.
+//
+// ★ this is why a repeat cannot walk an array: %: runs a format again
+// with the SAME parameters, so it emits one element N times.  Walking
+// is a property of the emitter, not of the loop.
+
 static void _r(void)
 {
-    size_t   len = (size_t)fs_pop();
-    uint8_t *ptr = (uint8_t *)(uintptr_t)fs_pop();
-    size_t   i;
+    size_t   i, j, size;
+    int      c1 = *wi->f_str++;
+    size_t   len;
+    uint8_t *ptr;
 
-    for (i = 0; i < len; i++)
-        b_emit(ptr[i]);
+    size = (size_t)(c1 - '0');
+
+    if ((size != 1) && (size != 2) && (size != 4))
+    {
+        wi->overrun = 1;        // not an element size - refuse loudly
+        return;
+    }
+
+    len = (size_t)fs_pop();
+    ptr = (uint8_t *)(uintptr_t)fs_pop();
+
+    if (ptr == NULL)
+    {
+        wi->overrun = 1;
+        return;
+    }
+
+    for (i = 0; i != len; i++)
+    {
+        // ⚠ big endian, like %w and %W - a raw byte copy would be right
+        // only on a big endian host, which is the bug this prevents.
+
+        for (j = size; j-- != 0; )
+        {
+            b_emit(ptr[(i * size) + j]);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------

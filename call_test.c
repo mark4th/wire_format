@@ -195,6 +195,41 @@ int main(void)
         ck("deep chain refused", wi_set_formats(&v, chain, WI_CALL_DEPTH + 2), -1);
     }
 
-    printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n] and %: work");
+    // ---- %rN - an array emitter that WALKS, which %: cannot --------
+    printf("ARRAY  %%rN\n");
+    {
+        uint8_t  b8[3]  = { 0x11, 0x22, 0x33 };
+        uint16_t b16[3] = { 0x1122, 0x3344, 0x5566 };
+        uint32_t b32[2] = { 0x11223344u, 0x55667788u };
+
+        wi_init(&v, buf, sizeof buf, p, 2);
+        p[0] = (int64_t)(uintptr_t)b8;  p[1] = 3;
+        wi_init(&v, buf, sizeof buf, p, 2);
+        n = wi_parse(&v, "%p1%p2%r1");
+        ck("%%r1 length", n, 3);
+        ck("  bytes", (buf[0]==0x11)&&(buf[1]==0x22)&&(buf[2]==0x33), 1);
+
+        p[0] = (int64_t)(uintptr_t)b16;  p[1] = 3;
+        wi_init(&v, buf, sizeof buf, p, 2);
+        n = wi_parse(&v, "%p1%p2%r2");
+        ck("%%r2 length", n, 6);
+        ck("  big endian", (buf[0]==0x11)&&(buf[1]==0x22)&&
+                           (buf[2]==0x33)&&(buf[3]==0x44), 1);
+
+        p[0] = (int64_t)(uintptr_t)b32;  p[1] = 2;
+        wi_init(&v, buf, sizeof buf, p, 2);
+        n = wi_parse(&v, "%p1%p2%r4");
+        ck("%%r4 length", n, 8);
+        ck("  big endian", (buf[0]==0x11)&&(buf[3]==0x44)&&
+                           (buf[4]==0x55)&&(buf[7]==0x88), 1);
+
+        // a size that is not 1, 2 or 4 is refused rather than guessed
+        p[0] = (int64_t)(uintptr_t)b8;  p[1] = 3;
+        wi_init(&v, buf, sizeof buf, p, 2);
+        wi_parse(&v, "%p1%p2%r3");
+        ck("%%r3 refused", v.overrun, 1);
+    }
+
+    printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n], %: and %rN work");
     return fails != 0;
 }

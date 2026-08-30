@@ -69,7 +69,7 @@ DNS encoder does for header + question.
 | `%b`      | emit 1 byte (alias for `%c`, explicit binary intent) |
 | `%w`      | emit 2 bytes big-endian (uint16) |
 | `%W`      | emit 4 bytes big-endian (uint32) |
-| `%r`      | emit raw buffer: TOS = length, next = pointer |
+| `%rN`     | emit a count of N-byte elements, big-endian: TOS = count, next = pointer. `%r1` bytes, `%r2` uint16, `%r4` uint32 |
 | `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
 | `%:`      | pop a repeat count for the next `%[n]` |
 
@@ -111,6 +111,33 @@ array.  On **decode** it means a callee storing into `%Pa` overwrites the
 caller's `a` — give parent and child disjoint letters, or read the
 child's values out before calling again.
 
+#### Arrays — `%rN`
+
+`%rN` emits a count of elements from a buffer, big-endian like `%w` and
+`%W`:
+
+```c
+"%p1%p2%r1"    // p1 = pointer, p2 = count.  bytes
+"%p1%p2%r2"    // ...uint16 array
+"%p1%p2%r4"    // ...uint32 array
+```
+
+⚠ **The digit is required.** Bare `%r` would have to guess, and guessing
+wrong means silently misreading a literal digit that followed it as an
+element size. A size other than 1, 2 or 4 sets `overrun` rather than
+being interpreted.
+
+⚠ A raw byte copy would be correct only on a big-endian host, which is
+the bug this prevents — the elements are byte-swapped on the way out
+exactly as `%w` does for a single value.
+
+★ **This is also why `%:` cannot walk an array.** A repeat runs a format
+again with the *same* parameters, so it emits one element N times.
+Walking is a property of the emitter, not of the loop — which is why the
+two are separate specifiers rather than one.
+
+---
+
 #### Repeating a call — `%:`
 
 `%:` pops a repeat count off the RPN stack and applies it to the next
@@ -125,6 +152,11 @@ child's values out before calling again.
 Taking the count from the stack rather than baking a digit into the
 string means it is not limited to a single digit, and it can be computed
 from parameters or arithmetic.
+
+⚠ **`%:` repeats something constant.** The parameters do not advance
+between iterations, so it cannot walk an array of distinct values — use
+`%rN` for a scalar array, and a C loop calling `wi_parse()` per element
+for an array of records. That is the same rule decoding already follows.
 
 **Zero works.**  `%{0}%:%[0]` does not call at all — the count is known
 *before* the call rather than after, which a count placed at the end of a
