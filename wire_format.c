@@ -204,6 +204,24 @@ static void _bW(void)
     b_emit((uint8_t)(v & 0xff));
 }
 
+// %q  emit 8 bytes big-endian
+//
+// ⚠ THE VALUE STACK IS int64_t, so a u64 above INT64_MAX rides as a
+// NEGATIVE int64.  the bytes are still exact - the cast below is to
+// uint64_t before any shifting - but a format that COMPARES such a
+// value (%> %< %=) is comparing it signed.  ⓘ in practice a 64 bit id
+// with a small kind byte at the top never reaches that range.
+static void _bq(void)
+{
+    uint64_t v = (uint64_t)fs_pop();
+    int      i;
+
+    for (i = 56; i >= 0; i -= 8)
+    {
+        b_emit((uint8_t)(v >> i));
+    }
+}
+
 // %B  read 1 byte from input → push
 static void _rB(void) { fs_push(b_read()); }
 
@@ -223,6 +241,24 @@ static void _rL(void)
     v |= (uint32_t)b_read() << 8;
     v |= b_read();
     fs_push(v);
+}
+
+// %Q  read 8 bytes big-endian → push as uint64
+//
+// ⚠ see %q: the result is pushed into an int64_t, so a value above
+// INT64_MAX reads back negative.  the CALLER casting to uint64_t gets
+// the exact bytes; a format comparing it in place does not.
+static void _rQ(void)
+{
+    uint64_t v = 0;
+    int      i;
+
+    for (i = 0; i != 8; i++)
+    {
+        v = (v << 8) | b_read();
+    }
+
+    fs_push((int64_t)v);
 }
 
 // %x  encode bit field: pop position, width, value → bit_acc |= (value & mask) << position
@@ -439,6 +475,7 @@ static const wi_op_t ops[] =
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
     { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
     { 'B', _rB      }, { 'S', _rS     }, { 'L', _rL     },
+    { 'q', _bq      }, { 'Q', _rQ     },
     { 'x', _bx      }, { 'X', _bX     }, { 'f', _f      },
     { '&', _and     }, { 'A', _andl   }, { '|', _or     },
     { 'O', _orl     }, { '^', _xor    }, { '~', _not    },

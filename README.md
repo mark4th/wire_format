@@ -69,6 +69,7 @@ DNS encoder does for header + question.
 | `%b`      | emit 1 byte (alias for `%c`, explicit binary intent) |
 | `%w`      | emit 2 bytes big-endian (uint16) |
 | `%W`      | emit 4 bytes big-endian (uint32) |
+| `%q`      | emit 8 bytes big-endian (uint64) |
 | `%rN`     | emit a count of N-byte elements, big-endian: TOS = count, next = pointer. `%r1` bytes, `%r2` uint16, `%r4` uint32 |
 | `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
 | `%:`      | pop a repeat count for the next `%[n]` |
@@ -359,7 +360,7 @@ if (v.overrun) { /* buf was too small - do not transmit len bytes */ }
 
 wire_format can also walk an incoming buffer and extract field values.  The
 same RPN stack, variables, and conditional logic are available; the
-difference is that `%B`, `%S`, and `%L` *read* bytes from an input buffer
+difference is that `%B`, `%S`, `%L`, and `%Q` *read* bytes from an input buffer
 and push them onto the stack rather than popping bytes and writing them out.
 
 ### Decode specifiers
@@ -369,9 +370,24 @@ and push them onto the stack rather than popping bytes and writing them out.
 | `%B`      | read 1 byte from input → push |
 | `%S`      | read 2 bytes big-endian → push as uint16 |
 | `%L`      | read 4 bytes big-endian → push as uint32 |
+| `%Q`      | read 8 bytes big-endian → push as uint64 |
 
 Results are captured into named variables with `%Pa`, `%Pb`, … and read
 back from `wi_vars_t.atoz[]` after parsing.
+
+#### 64-bit values and the signed stack
+
+`%q` and `%Q` move all eight bytes exactly, in both directions — a value
+written with `%q` and read back with `%Q` is bit-identical.
+
+⚠ The value stack is `int64_t`, so a `uint64_t` above `INT64_MAX` is
+carried as a *negative* `int64_t`. That costs nothing when the value is
+only being moved: cast `wi_vars_t.atoz[]` back to `uint64_t` at the call
+site and the bytes are right. It matters only if a format *compares* such
+a value in place with `%>`, `%<` or `%=`, which compare signed.
+
+ⓘ A 64-bit id with a small tag in its top byte never reaches that range,
+which is the usual case for this specifier.
 
 ### Initialisation
 

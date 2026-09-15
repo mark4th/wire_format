@@ -6,16 +6,20 @@ CFLAGS  = -Wall -Wextra -std=c11 -g -O2
 SRCS    = wire_format.c dns.c dns_demo.c
 OBJS    = $(SRCS:.c=.o)
 TARGET  = dns_demo
-TESTS   = call_test
+TESTS   = call_test quad_test
 
 $(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^
+
+quad_test: quad_test.c wire_format.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 call_test: call_test.c wire_format.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: call_test
+test: call_test quad_test
 	./call_test
+	./quad_test
 
 # ⚠ -MMD -MP.  without these a change to wire_format.h rebuilds NOTHING
 # and links a stale object against the new struct - which is exactly how
