@@ -1,5 +1,8 @@
 # wire format info parser
 
+The human-readable protocol source language is defined in
+[doc/WF_FILE_FORMAT.md](doc/WF_FILE_FORMAT.md).
+
 ## What it is
 
 wire_format is a compact, data-driven binary protocol encoder built around a
