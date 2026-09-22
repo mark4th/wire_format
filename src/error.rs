@@ -1,0 +1,22 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    StackOverflow,
+    StackUnderflow,
+    TypeMismatch,
+    OutputUnavailable,
+    OutputFull,
+    InputUnavailable,
+    InputEof,
+    InvalidOperator(u8),
+    InvalidParam,
+    InvalidVariable(u8),
+    InvalidLiteral,
+    LiteralOverflow,
+    UnterminatedLiteral,
+    UnterminatedConditional,
+    RawUnavailable,
+    RawLength,
+    ValueOutOfRange,
+    InvalidBitField,
+    FaultAbort(u32),
+}

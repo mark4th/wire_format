@@ -1,8 +1,8 @@
-// winfo.h  - wire format info parser
+// wire_format.h  - wire format info parser
 // -----------------------------------------------------------------------
 
-#ifndef WINFO_H
-#define WINFO_H
+#ifndef WIRE_FORMAT_H
+#define WIRE_FORMAT_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -23,8 +23,7 @@ typedef struct
     int      fsp;                       // stack pointer
 
     int64_t  params[WI_MAX_PARAMS];     // caller-supplied parameters
-    int64_t  atoz[WI_MAX_VARS];         // dynamic variables a-z
-    int64_t  AtoZ[WI_MAX_VARS];         // dynamic variables A-Z
+    int64_t  vars[WI_MAX_VARS];         // variables a-z; A-Z are aliases
 
     uint8_t       *out;                 // output buffer (encode)
     size_t         out_size;            // output buffer capacity
@@ -34,11 +33,12 @@ typedef struct
     size_t         in_size;             // input buffer capacity
     size_t         in_pos;              // bytes consumed so far
 
-    int      digits;                    // for %2d / %3d
-
     uint8_t  bit_acc;                   // encode bit accumulator
     uint8_t  in_acc;                    // decode bit accumulator
     uint8_t  in_loaded;                 // decode: byte loaded into in_acc
+
+    uint32_t faults;                    // fault bits raised during this parse
+    uint32_t abort_mask;                // raised faults matching this mask abort parse
 } wi_vars_t;
 
 // -----------------------------------------------------------------------
@@ -49,7 +49,7 @@ void    wi_init(wi_vars_t *v, uint8_t *buf, size_t bufsize,
 
 // decode: set input buffer and parameters, then call wi_parse()
 // in_pos advances with each call; multiple wi_parse() calls continue
-// from where the previous left off.  Results land in v->atoz[].
+// from where the previous left off.  Results land in v->vars[].
 void    wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
                        int64_t *params, int nparams);
 
@@ -57,6 +57,6 @@ size_t  wi_parse(wi_vars_t *v, const char *fmt);
 
 // -----------------------------------------------------------------------
 
-#endif // WINFO_H
+#endif // WIRE_FORMAT_H
 
 // =======================================================================

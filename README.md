@@ -83,7 +83,7 @@ parameter 2, and so on.
 ### Variables
 
 `%Pa` stores TOS into variable `a`; `%ga` retrieves it.
-Lower-case `a`–`z` and upper-case `A`–`Z` are available.
+Lower-case `a`-`z` and upper-case `A`-`Z` name the same 26 variable slots, so `a` and `A` are aliases.
 
 ### Conditionals
 
@@ -92,6 +92,30 @@ Lower-case `a`–`z` and upper-case `A`–`Z` are available.
 ```
 
 The `%e` else clause is optional.
+
+### Faults
+
+`%E` pops a 32-bit fault mask, ORs it into the parser's `faults` field, and
+continues unless that mask intersects the caller-supplied `abort_mask`. This
+keeps validation policy outside the format string: one caller can treat a fault
+as diagnostic information while another can stop parsing immediately.
+
+Fault names are application-level constants. A JSON or table-driven frontend can
+spell a fault as `BAD_MAGIC` and compile it down to `%{1}%E`.
+
+```c
+#define FAULT_BAD_MAGIC  (1u << 0)
+
+wi_decode_init(&v, frame, frame_len, NULL, 0);
+v.abort_mask = FAULT_BAD_MAGIC;
+wi_parse(&v, frame_header_format);
+if (v.faults & FAULT_BAD_MAGIC) {
+    /* reject frame */
+}
+```
+
+`faults` resets at the start of each `wi_parse()` call. `abort_mask` is caller
+policy and is left unchanged.
 
 ---
 
@@ -174,8 +198,8 @@ and push them onto the stack rather than popping bytes and writing them out.
 | `%S`      | read 2 bytes big-endian → push as uint16 |
 | `%L`      | read 4 bytes big-endian → push as uint32 |
 
-Results are captured into named variables with `%Pa`, `%Pb`, … and read
-back from `wi_vars_t.atoz[]` after parsing.
+Results are captured into named variables with `%Pa`, `%Pb`, ... and read
+back from `wi_vars_t.vars[]` after parsing.
 
 ### Initialisation
 
@@ -203,9 +227,9 @@ const char wi_dns_resp_hdr[] =
 wi_decode_init(&v, response, rlen, NULL, 0);
 wi_parse(&v, wi_dns_resp_hdr);
 
-uint16_t txid    = (uint16_t)v.atoz[0];  // a
-uint16_t flags   = (uint16_t)v.atoz[1];  // b
-uint16_t ancount = (uint16_t)v.atoz[3];  // d
+uint16_t txid    = (uint16_t)v.vars[0];  // a
+uint16_t flags   = (uint16_t)v.vars[1];  // b
+uint16_t ancount = (uint16_t)v.vars[3];  // d
 ```
 
 After this call `v.in_pos` is 12 (the DNS fixed header length), ready to
@@ -224,9 +248,9 @@ v.in_pos = (size_t)(p - buf);  // sync past skipped name
 wi_parse(&v, wi_dns_rr);
 p = buf + v.in_pos;
 
-uint16_t type     = (uint16_t)v.atoz[0];
-uint32_t ttl      = (uint32_t)v.atoz[2];
-uint16_t rdlength = (uint16_t)v.atoz[3];
+uint16_t type     = (uint16_t)v.vars[0];
+uint32_t ttl      = (uint32_t)v.vars[2];
+uint16_t rdlength = (uint16_t)v.vars[3];
 ```
 
 ---
@@ -272,7 +296,7 @@ const char wi_ip_first_byte_dec[] =
     "%f";              // advance past the byte
 ```
 
-After parsing, `v.atoz[0]` holds the version and `v.atoz[1]` holds IHL.
+After parsing, `v.vars[0]` holds the version and `v.vars[1]` holds IHL.
 
 ### Notes
 
@@ -342,15 +366,41 @@ stack-allocated.
 
 ---
 
+## Rust port
+
+A standalone Rust port is included as a separate crate so the format-string
+protocol-builder idea can be evaluated independently.
+
+```sh
+cargo test
+cargo run --example telemetry_demo
+```
+
+The Rust API keeps message definitions as strings and uses caller-supplied
+buffers. Raw byte emission uses `Param::Raw(&bytes)` instead of passing raw
+pointers through integer parameters, which keeps the Rust port safe while
+preserving the same stack-driven layout model. Fault policy is set with
+`WireFormat::set_abort_mask()`, and raised fault bits are available with
+`WireFormat::faults()` after a parse.
+
 ## Files
 
 | File            | Purpose |
 |-----------------|---------|
 | `wire_format.h` | public API and types |
-| `wire_format.c` | format string parser |
+| `wire_format.c` | C format string parser |
 | `dns.h`         | DNS constants and format string declarations |
 | `dns.c`         | DNS query construction and response parsing |
-| `dns_demo.c`    | command-line demo |
+| `dns_demo.c`    | C command-line DNS demo |
+| `Cargo.toml`    | Rust crate manifest |
+| `src/lib.rs`    | Rust crate facade and public re-exports |
+| `src/error.rs`  | Rust error type |
+| `src/param.rs`  | Rust public parameters and internal stack values |
+| `src/format.rs` | Rust format-string scanner helpers |
+| `src/ops.rs`    | Rust arithmetic, variable, and bit-field helpers |
+| `src/parser.rs` | Rust `WireFormat` parser engine |
+| `src/tests.rs`  | Rust unit tests |
+| `examples/telemetry_demo.rs` | Rust protocol-frame demo |
 
 ---
 

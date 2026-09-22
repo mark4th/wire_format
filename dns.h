@@ -1,4 +1,4 @@
-// dns.h  - DNS protocol definitions and format strings for winfo demo
+// dns.h  - DNS protocol definitions and format strings for wire_format demo
 // -----------------------------------------------------------------------
 
 #ifndef DNS_H
@@ -23,7 +23,7 @@
 #define DNS_HDR_LEN     12      // fixed header size
 
 // -----------------------------------------------------------------------
-// winfo format strings
+// wire_format strings
 //
 // wi_dns_header:
 //   p1 = transaction ID  (uint16)
@@ -38,11 +38,11 @@
 //   p4 = QCLASS                 (uint16)
 //
 // wi_dns_resp_hdr  (decode):
-//   reads 6 x uint16; results in atoz[]: a=txid b=flags c=qdcount
+//   reads 6 x uint16; results in vars[]: a=txid b=flags c=qdcount
 //   d=ancount e=nscount f=arcount
 //
 // wi_dns_rr  (decode):
-//   reads RR fixed fields after name; results in atoz[]:
+//   reads RR fixed fields after name; results in vars[]:
 //   a=type b=class c=ttl(uint32) d=rdlength
 
 extern const char wi_dns_header[];

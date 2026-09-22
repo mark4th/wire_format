@@ -1,4 +1,4 @@
-# winfo Makefile
+# wire_format Makefile
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -std=c11 -g -O2

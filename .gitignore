@@ -1,2 +1,4 @@
 *.o
-winfo_demo
+dns_demo
+target/
+Cargo.lock

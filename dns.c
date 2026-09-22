@@ -1,15 +1,15 @@
-// dns.c  - DNS query construction and response parsing via winfo
+// dns.c  - DNS query construction and response parsing via wire_format
 // -----------------------------------------------------------------------
 
 #include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
 
-#include "winfo.h"
+#include "wire_format.h"
 #include "dns.h"
 
 // -----------------------------------------------------------------------
-// winfo format strings for DNS message construction
+// wire_format strings for DNS message construction
 //
 // Header: 6 x uint16 big-endian
 //   ID | flags | QDCOUNT | ANCOUNT | NSCOUNT | ARCOUNT
@@ -93,10 +93,10 @@ size_t dns_build_query(const char *name, uint16_t qtype, uint16_t txid,
 }
 
 // -----------------------------------------------------------------------
-// winfo format strings for DNS response decoding
+// wire_format strings for DNS response decoding
 //
 // wi_dns_resp_hdr: decode 6 x uint16 header fields
-//   results in atoz[]: a=txid b=flags c=qdcount d=ancount e=nscount f=arcount
+//   results in vars[]: a=txid b=flags c=qdcount d=ancount e=nscount f=arcount
 
 const char wi_dns_resp_hdr[] =
     "%S%Pa"         // txid    -> a
@@ -107,7 +107,7 @@ const char wi_dns_resp_hdr[] =
     "%S%Pf";        // arcount -> f
 
 // wi_dns_rr: decode RR fixed fields (call after name has been skipped)
-//   results in atoz[]: a=type b=class c=ttl(uint32) d=rdlength
+//   results in vars[]: a=type b=class c=ttl(uint32) d=rdlength
 
 const char wi_dns_rr[] =
     "%S%Pa"         // type     -> a
@@ -142,10 +142,10 @@ void dns_print_response(const uint8_t *buf, size_t len)
     wi_decode_init(&v, buf, len, NULL, 0);
     wi_parse(&v, wi_dns_resp_hdr);
 
-    uint16_t txid    = (uint16_t)v.atoz[0];   // a
-    uint16_t flags   = (uint16_t)v.atoz[1];   // b
-    uint16_t qdcount = (uint16_t)v.atoz[2];   // c
-    uint16_t ancount = (uint16_t)v.atoz[3];   // d
+    uint16_t txid    = (uint16_t)v.vars[0];   // a
+    uint16_t flags   = (uint16_t)v.vars[1];   // b
+    uint16_t qdcount = (uint16_t)v.vars[2];   // c
+    uint16_t ancount = (uint16_t)v.vars[3];   // d
     uint16_t rcode   = flags & 0x000f;
 
     printf("txid=0x%04x  flags=0x%04x  questions=%u  answers=%u\n",
@@ -157,7 +157,7 @@ void dns_print_response(const uint8_t *buf, size_t len)
         return;
     }
 
-    // skip question section (names are variable-length; not suitable for winfo)
+    // skip question section (names are variable-length; not suitable for fixed format strings)
     const uint8_t *p = buf + v.in_pos;
     uint16_t i;
 
@@ -176,9 +176,9 @@ void dns_print_response(const uint8_t *buf, size_t len)
         wi_parse(&v, wi_dns_rr);
         p = buf + v.in_pos;
 
-        uint16_t type     = (uint16_t)v.atoz[0];   // a
-        uint32_t ttl      = (uint32_t)v.atoz[2];   // c
-        uint16_t rdlength = (uint16_t)v.atoz[3];   // d
+        uint16_t type     = (uint16_t)v.vars[0];   // a
+        uint32_t ttl      = (uint32_t)v.vars[2];   // c
+        uint16_t rdlength = (uint16_t)v.vars[3];   // d
 
         if (type == DNS_QTYPE_A && rdlength == 4)
         {
