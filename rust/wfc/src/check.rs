@@ -357,27 +357,45 @@ mod tests {
         check(&protocol)
     }
 
+    fn source(fields: &str, vectors: &str) -> String {
+        source_with_orders(fields, vectors, "big-endian", "msb-first")
+    }
+
+    fn source_with_orders(
+        fields: &str,
+        vectors: &str,
+        byte_order: &str,
+        bit_order: &str,
+    ) -> String {
+        format!(
+            r#"{{
+  wire_format: 1,
+  protocol: {{
+    name: 'test',
+    description: 'test protocol',
+    byte_order: '{byte_order}',
+    bit_order: '{bit_order}',
+    messages: [{{
+      name: 'header',
+      description: 'header',
+      fields: [{fields}],
+      vectors: [{vectors}],
+    }}],
+  }},
+}}"#
+        )
+    }
+
     #[test]
     fn checks_msb_fields_which_cross_octets() {
-        let source = r#"wire-format 1
-protocol crossing
-description "crossing"
-byte-order big-endian
-bit-order msb-first
-message header
-description "header"
-field first bits 5
-field second bits 11
-vector nominal
-first = 0x15
-second = 0x567
-wire AD 67
-end-vector
-end-message
-end-protocol
-"#;
+        let source = source(
+            "{ name: 'first', type: 'bits', width: 5 },
+             { name: 'second', type: 'bits', width: 11 }",
+            "{ name: 'nominal', values: { first: 0x15, second: 0x567 },
+               wire: [0xad, 0x67] }",
+        );
         assert_eq!(
-            checked(source).unwrap(),
+            checked(&source).unwrap(),
             Summary {
                 messages: 1,
                 vectors: 1,
@@ -388,115 +406,67 @@ end-protocol
 
     #[test]
     fn checks_lsb_fields_and_little_endian_scalars() {
-        let source = r#"wire-format 1
-protocol little
-description "little"
-byte-order little-endian
-bit-order lsb-first
-message header
-description "header"
-field low bits 3
-constant middle bits 2 = 2
-field high bits 3
-field count u16
-vector nominal
-low = 5
-high = 3
-count = 0x1234
-wire 75 34 12
-end-vector
-end-message
-end-protocol
-"#;
-        checked(source).unwrap();
+        let source = source_with_orders(
+            "{ name: 'low', type: 'bits', width: 3 },
+             { name: 'middle', type: 'bits', width: 2, constant: 2 },
+             { name: 'high', type: 'bits', width: 3 },
+             { name: 'count', type: 'u16' }",
+            "{ name: 'nominal', values: { low: 5, high: 3, count: 0x1234 },
+               wire: [0x75, 0x34, 0x12] }",
+            "little-endian",
+            "lsb-first",
+        );
+        checked(&source).unwrap();
     }
 
     #[test]
     fn rejects_unaligned_scalar() {
-        let source = r#"wire-format 1
-protocol bad
-description "bad"
-byte-order big-endian
-bit-order msb-first
-message header
-description "header"
-field flags bits 3
-field count u16
-end-message
-end-protocol
-"#;
-        let error = checked(source).unwrap_err();
+        let source = source(
+            "{ name: 'flags', type: 'bits', width: 3 },
+             { name: 'count', type: 'u16' }",
+            "",
+        );
+        let error = checked(&source).unwrap_err();
         assert!(error.message.contains("not an octet boundary"));
     }
 
     #[test]
     fn rejects_missing_assignment() {
-        let source = r#"wire-format 1
-protocol bad
-description "bad"
-byte-order big-endian
-bit-order msb-first
-message header
-description "header"
-field value u8
-vector empty
-wire 00
-end-vector
-end-message
-end-protocol
-"#;
-        let error = checked(source).unwrap_err();
+        let source = source(
+            "{ name: 'value', type: 'u8' }",
+            "{ name: 'empty', values: {}, wire: [0] }",
+        );
+        let error = checked(&source).unwrap_err();
         assert!(error.message.contains("has no value for field `value`"));
     }
 
     #[test]
     fn rejects_a_bad_constant_on_the_wire() {
-        let source = r#"wire-format 1
-protocol bad
-description "bad"
-byte-order big-endian
-bit-order msb-first
-message header
-description "header"
-constant version bits 3 = 0
-field value bits 5
-vector wrong-version
-value = 1
-wire E1
-end-vector
-end-message
-end-protocol
-"#;
-        let error = checked(source).unwrap_err();
+        let source = source(
+            "{ name: 'version', type: 'bits', width: 3, constant: 0 },
+             { name: 'value', type: 'bits', width: 5 }",
+            "{ name: 'wrong-version', values: { value: 1 }, wire: [0xe1] }",
+        );
+        let error = checked(&source).unwrap_err();
         assert!(error.message.contains("decodes constant `version` as 7"));
     }
 
     #[test]
     fn rejects_out_of_range_vector_value() {
-        let source = r#"wire-format 1
-protocol bad
-description "bad"
-byte-order big-endian
-bit-order msb-first
-message header
-description "header"
-field value bits 3
-constant padding bits 5 = 0
-vector range
-value = 8
-wire 00
-end-vector
-end-message
-end-protocol
-"#;
-        let error = checked(source).unwrap_err();
+        let source = source(
+            "{ name: 'value', type: 'bits', width: 3 },
+             { name: 'padding', type: 'bits', width: 5, constant: 0 }",
+            "{ name: 'range', values: { value: 8 }, wire: [0] }",
+        );
+        let error = checked(&source).unwrap_err();
         assert!(error.message.contains("does not fit in a 3-bit field"));
     }
 
     #[test]
     fn rejects_nul_in_compiled_text() {
-        let source = "wire-format 1\nprotocol bad\ndescription \"bad\0text\"\nbyte-order big-endian\nbit-order msb-first\nmessage header\ndescription \"header\"\nfield value u8\nend-message\nend-protocol\n";
-        let error = checked(source).unwrap_err();
+        let source =
+            source("{ name: 'value', type: 'u8' }", "").replace("test protocol", "bad\\u0000text");
+        let error = checked(&source).unwrap_err();
         assert!(error.message.contains("may not contain a NUL octet"));
     }
 }

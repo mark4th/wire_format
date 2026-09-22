@@ -3,19 +3,30 @@
 The human-readable protocol source language is defined in
 [doc/WF_FILE_FORMAT.md](doc/WF_FILE_FORMAT.md).
 
-The source checker can be run directly through Cargo:
+Build and run the C compiler with:
 
 ```sh
-cargo run --bin wfc -- check examples/example-telemetry.wf
+make wfc
+./wfc check examples/example-telemetry.wf.json5
 ```
 
 With no `check` command, compilation is implied.  The compiler emits a
 position-independent binary database and its symbolic C header:
 
 ```sh
-cargo run --bin wfc -- examples/example-telemetry.wf \
+./wfc examples/example-telemetry.wf.json5 \
     --output build/example_telemetry
 ```
+
+An independent Rust implementation has the same interface:
+
+```sh
+cargo run -p wfc -- check examples/example-telemetry.wf.json5
+```
+
+The C compiler carries its JSON5 parser under `compiler/`. The Rust compiler's
+JSON5 and Serde crates are confined to `rust/wfc/`. Neither the C nor Rust
+run-time interpreter contains a JSON parser or depends on one.
 
 This creates `build/example_telemetry.wfb` and `build/example_telemetry.h`.
 The binary may be read from storage, copied to memory, or embedded verbatim
@@ -551,7 +562,12 @@ After parsing, `v.vars[0]` holds the version and `v.vars[1]` holds IHL.
 
 ## Compiled protocol database
 
-`wfc` turns a `.wf` source into one `.wfb` database.  The file contains a fixed
+`wfc` turns a `.wf.json5` source into one `.wfb` database. JSON5 permits the
+comments, hexadecimal values, and trailing commas expected in a maintained
+protocol definition. The C and Rust compilers consume the same source and must
+produce byte-for-byte identical output.
+
+The `.wfb` contains a fixed
 header, one fixed-size record per message, field-value metadata, an array of
 string offsets, and one common string table.  Every location stored in the
 file is an integer offset.  It contains no pointers, native C structures, or
@@ -657,7 +673,9 @@ let params = [
 
 `WireFormat::set_formats(&formats)` supplies the table used by `%[n]` and
 checks the actual nesting depth before parsing. The implementation uses a fixed
-return stack and remains `no_std` and allocation-free. Buffer exhaustion is a
+return stack and remains `no_std`, allocation-free, and dependency-free. The
+host-only Rust compiler under `rust/wfc/` owns the JSON5 and Serde dependencies;
+they are not linked into the run-time crate. Buffer exhaustion is a
 Rust `Error::OutputFull` or `Error::InputEof` rather than C's `overrun` flag.
 Fault policy is set with `WireFormat::set_abort_mask()`, and raised fault bits
 are available with `WireFormat::faults()` after a parse.
@@ -671,6 +689,7 @@ are available with `WireFormat::faults()` after a parse.
 | `dns.h`         | DNS constants and format string declarations |
 | `dns.c`         | DNS query construction and response parsing |
 | `dns_demo.c`    | C command-line DNS demo |
+| `compiler/` | C JSON5 parser, source checker, and `.wfb` compiler |
 | `Cargo.toml` | Cargo workspace manifest |
 | `rust/Cargo.toml` | Rust crate manifest |
 | `rust/src/lib.rs` | Rust crate facade and public re-exports |
@@ -680,11 +699,13 @@ are available with `WireFormat::faults()` after a parse.
 | `rust/src/ops.rs` | Rust arithmetic, variable, and bit-field helpers |
 | `rust/src/parser.rs` | Rust `WireFormat` parser engine |
 | `rust/src/tests.rs` | Rust unit tests |
-| `rust/src/bin/wfc/` | `.wf` lexer, parser, checker, `.wfb` compiler, and atomic output writer |
-| `rust/tests/wfc_cli.rs` | `wfc` command-line and `.incbin` integration tests |
-| `doc/WF_FILE_FORMAT.md` | normative `.wf` source-language definition |
+| `rust/wfc/` | independent Rust JSON5 checker and `.wfb` compiler |
+| `rust/wfc/tests/wfc_cli.rs` | Rust `wfc` command-line and `.incbin` integration tests |
+| `tests/wfc_conformance.sh` | C/Rust byte-for-byte compiler conformance test |
+| `doc/WF_FILE_FORMAT.md` | normative `.wf.json5` source-format definition |
 | `doc/WFB_FILE_FORMAT.md` | normative compiled binary format |
-| `examples/example-telemetry.wf` | checked and compiled `.wf` example |
+| `schema/wire-format-v1.schema.json` | JSON Schema for source-format version 1 |
+| `examples/example-telemetry.wf.json5` | checked and compiled JSON5 example |
 | `rust/examples/telemetry_demo.rs` | Rust protocol-frame demo |
 
 ---

@@ -1,369 +1,283 @@
-# The `.wf` source format
+# The `.wf.json5` source format
 
 ## Purpose
 
-A `.wf` file is the human-readable description of the wire layout used by
-one protocol.  `wfc` reads that description, checks it, and generates a
-compiled `.wfb` database plus a header naming its contents.
+A `.wf.json5` file is the human-readable description of one wire protocol.
+`wfc` checks that description and compiles it into a position-independent
+`.wfb` database plus a C header naming the database contents.
 
-The application decides how the compiled database is made available.  It may
+JSON5 is used because protocol descriptions are source code, not data exchanged
+on the wire. It permits comments, trailing commas, hexadecimal integers,
+unquoted object keys, and single-quoted strings. The accepted object shape is
+still strict: misspelled or unknown properties are errors.
+
+The JSON Schema is
+[../schema/wire-format-v1.schema.json](../schema/wire-format-v1.schema.json).
+The schema documents the source structure. `wfc` also performs layout and test
+vector checks which JSON Schema cannot express.
+
+The application decides how the compiled database is made available. It may
 load the `.wfb`, embed it in an executable, or place it in firmware storage.
-The source language and compiler do not add run-time protocol discovery or
-choose a storage mechanism.
+Neither the source format nor the compiler imposes a run-time loader.
 
-A `.wf` file describes how records are represented on the wire.  It does not
-describe what an application does with a record, when it sends one, how it
-retries a failed transaction, or which state follows another state.  Those
-are properties of the application and its protocol engine.
+A source file describes records on the wire. It does not describe what an
+application does with a record, when it sends one, how it retries a failed
+transaction, or which state follows another state. Those are properties of
+the application and its protocol engine.
 
-Version 1 deliberately describes fixed-size records.  This is sufficient for
-the primary headers of the first CCSDS definitions.  Variable-length byte
-strings, calculated lengths, checksums, and conditional fields will be added
-only after their source representation and run-time bounds are equally clear.
+Version 1 describes fixed-size records.
 
-## A complete example
+## Complete example
 
-```text
-wire-format 1
+```json5
+{
+  wire_format: 1,
 
-protocol example-telemetry
-description "A small example used to document the source language"
-standard "Example 1"
-reference "https://example.invalid/example-1"
+  protocol: {
+    name: 'example-telemetry',
+    description: 'A small source-format example',
+    standard: 'Example 1',
+    reference: 'https://example.invalid/example-1',
 
-byte-order big-endian
-bit-order msb-first
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
 
-message status
-description "A three-octet status record"
+    messages: [
+      {
+        name: 'status',
+        description: 'A three-octet status record',
 
-field version bits 3
-constant reserved bits 1 = 0
-field mode bits 4
-field sample-count u16
+        fields: [
+          { name: 'version', type: 'bits', width: 3 },
 
-vector nominal
-version = 1
-mode = 2
-sample-count = 0x1234
-wire 22 12 34
-end-vector
+          // Constants are emitted and checked without becoming caller values.
+          { name: 'reserved', type: 'bits', width: 1, constant: 0 },
 
-end-message
-end-protocol
+          { name: 'mode', type: 'bits', width: 4 },
+          { name: 'sample-count', type: 'u16' },
+        ],
+
+        vectors: [
+          {
+            name: 'nominal',
+            values: {
+              version: 1,
+              mode: 2,
+              'sample-count': 0x1234,
+            },
+            wire: [0x22, 0x12, 0x34],
+          },
+        ],
+      },
+    ],
+  },
+}
 ```
 
-This record begins with three fields packed into one octet.  The `u16` begins
-at the next octet and follows the file's declared byte order.  The caller
-supplies `version`, `mode`, and `sample-count`.  The generated encoder supplies
-the reserved zero itself, and the generated decoder reports a nonzero reserved
-field.
+The record begins with three fields packed into one octet. The `u16` begins at
+the next octet and follows `byte_order`. The caller supplies `version`, `mode`,
+and `sample-count`. The generated encoder supplies the reserved zero, and the
+generated decoder raises a fixed-field fault if it is not zero.
 
-## Lexical rules
+## Source rules
 
-A `.wf` file is UTF-8 text.  The language keywords and identifiers use ASCII.
+The file is UTF-8 JSON5. In addition to ordinary JSON, the compiler accepts:
 
-- A blank line is ignored.
-- `#` begins a comment which continues to the end of the line.  A `#` inside
-  a quoted string is ordinary text.
-- One statement occupies one physical line.  Version 1 has no continuation
-  character and no semicolons.
-- Keywords are lower case and case-sensitive.
-- An identifier begins with `a` through `z`.  The remaining characters may
-  be lower-case letters, digits, or hyphens.
-- An identifier may not begin or end with a hyphen, and may not contain two
-  adjacent hyphens.
-- Decimal integers and hexadecimal integers beginning with `0x` are accepted.
-  Underscores may separate digits and have no value.
-- A string is enclosed in double quotes.  The escapes `\\`, `\"`, `\n`, and
-  `\t` are accepted.  A string may not cross a physical line.
-- The `wire` statement contains whitespace-separated hexadecimal octets.
-  Every octet is written as exactly two hexadecimal digits without `0x`.
+- `//` and `/* ... */` comments;
+- trailing commas;
+- unquoted object keys when JSON5 permits them;
+- single-quoted strings; and
+- hexadecimal unsigned integers beginning with `0x`.
 
-Identifiers are part of the generated interface and are therefore stable
-names, not prose labels.  The generated C header changes hyphens to
-underscores.
+The file must contain exactly two top-level properties:
 
-## File structure
+| Property | Meaning |
+|----------|---------|
+| `wire_format` | Source-format version. Version 1 requires the integer `1`. |
+| `protocol` | The protocol object described below. |
 
-The first non-comment statement must be:
+Unknown properties are errors at every level. An integer used for a value or
+constant must fit in an unsigned 64-bit value.
 
-```text
-wire-format 1
+### Identifiers
+
+Protocol, message, field, and vector names are identifiers. An identifier:
+
+- starts with `a` through `z`;
+- contains only lower-case ASCII letters, digits, and hyphens;
+- does not end in a hyphen; and
+- does not contain two adjacent hyphens.
+
+Identifiers are stable generated-interface names, not prose labels. The C
+header changes hyphens to underscores and converts names to upper case.
+
+## The protocol object
+
+| Property | Required | Meaning |
+|----------|:--------:|---------|
+| `name` | yes | Protocol identifier. |
+| `description` | yes | Human-readable description. |
+| `standard` | no | Standard name and revision. |
+| `reference` | no | Source document, section, or URL. |
+| `byte_order` | yes | `big-endian` or `little-endian`. |
+| `bit_order` | yes | `msb-first` or `lsb-first`. |
+| `messages` | yes | Nonempty array of message objects. |
+
+Descriptions and present optional text must not be empty and must not contain
+a NUL character. Message names must be unique within the protocol.
+
+Orders are explicit even if the first version of a protocol happens to use
+only octet fields. The compiler never selects the host's native order.
+
+## Message objects
+
+| Property | Required | Meaning |
+|----------|:--------:|---------|
+| `name` | yes | Message identifier. |
+| `description` | yes | Human-readable description. |
+| `fields` | yes | Nonempty array of field objects in wire order. |
+| `vectors` | no | Array of independently derived test vectors. |
+
+The order of `messages` determines the compiled message ordinals. The order of
+`fields` defines the wire layout. Message, field, and vector names must be
+unique in their respective scopes. Native structure layout is never used.
+
+## Field objects
+
+A caller-supplied field contains `name` and `type`:
+
+```json5
+{ name: 'apid', type: 'bits', width: 11 }
+{ name: 'sequence-count', type: 'u16' }
 ```
 
-It is followed by exactly one protocol:
+A constant field also contains `constant`:
 
-```text
-protocol protocol-name
-description "What this protocol definition covers"
-standard "Optional standard name and revision"
-reference "Optional source or URL"
-
-byte-order big-endian
-bit-order msb-first
-
-message first-message
-...
-end-message
-
-message second-message
-...
-end-message
-
-end-protocol
+```json5
+{ name: 'version', type: 'bits', width: 3, constant: 0 }
+{ name: 'marker', type: 'u16', constant: 0x1acf }
 ```
 
-`description` is required for the protocol.  `standard` and `reference` are
-optional and may each occur once.  A file must contain at least one message.
-Statements occur in the order shown.  When both optional statements are
-present, `standard` precedes `reference`.  A description, standard, or
-reference which is present must contain something other than whitespace.
+| Type | Extra property | Wire representation |
+|------|----------------|---------------------|
+| `bits` | `width`, from 1 through 64 | Unsigned packed bit field. |
+| `u8` | none | One octet. |
+| `u16` | none | Two octets in `byte_order`. |
+| `u32` | none | Four octets in `byte_order`. |
+| `u64` | none | Eight octets in `byte_order`. |
 
-`byte-order` and `bit-order` are required even when a file currently uses only
-one-octet fields.  An omitted order is an ambiguity, not permission for the
-compiler to choose the host's order.
+`width` is required for `bits` and forbidden for scalar types. Values must fit
+their declared widths. The compiler rejects a value rather than silently
+discarding its high bits.
 
-Version 1 accepts these byte orders:
+A constant is not present in the caller's value array. The encoder emits it
+automatically. The decoder compares the received value with it and raises the
+fixed-field fault when they differ. The calling application decides whether
+that fault invalidates the record.
 
-```text
-byte-order big-endian
-byte-order little-endian
-```
+Names such as `reserved`, `spare`, `version`, and `marker` have no built-in
+meaning.
 
-Version 1 accepts these bit orders:
+## Bit and scalar layout
 
-```text
-bit-order msb-first
-bit-order lsb-first
-```
+Fields consume the record from left to right in array order. No padding or
+alignment is inserted.
 
-The order applies to every message in the file.  Two parts of a protocol with
-different orders belong in separate `.wf` files.
+`msb-first` places the first bit in bit 7 of the current octet and continues
+toward bit 0. A field crossing an octet boundary continues at bit 7 of the
+next octet.
 
-## Messages
+`lsb-first` places the first bit in bit 0 and continues toward bit 7. A field
+crossing an octet boundary continues at bit 0 of the next octet.
 
-A message begins with `message name` and ends with `end-message`.  Its first
-statement must be a description:
-
-```text
-message status
-description "The fixed status header"
-...
-end-message
-```
-
-A message contains one or more field declarations followed by zero or more
-test vectors.  Declarations and vectors may not be interleaved.
-
-Message and field identifiers must be unique in their respective scopes.
-Generated values appear in field declaration order; no source or target ABI
-structure layout is used.
-
-The complete statement grammar is:
-
-```text
-file             = version protocol-header message+ "end-protocol"
-version          = "wire-format" "1"
-protocol-header  = "protocol" identifier
-                   "description" string
-                   [ "standard" string ]
-                   [ "reference" string ]
-                   "byte-order" byte-order
-                   "bit-order" bit-order
-byte-order       = "big-endian" | "little-endian"
-bit-order        = "msb-first" | "lsb-first"
-message          = "message" identifier
-                   "description" string
-                   declaration+ vector*
-                   "end-message"
-declaration      = field | constant
-field            = "field" identifier type
-constant         = "constant" identifier type "=" integer
-type             = "bits" integer | "u8" | "u16" | "u32" | "u64"
-vector           = "vector" identifier
-                   assignment* wire+
-                   "end-vector"
-assignment       = identifier "=" integer
-wire             = "wire" hex-octet+
-```
-
-Each quoted word in this grammar is a keyword appearing at the start of its
-own physical line.  The remaining items on that grammar row are its arguments;
-the grammar does not join several statements onto one source line.  Blank
-lines and comments may occur between any two statements.
-
-### Caller-supplied fields
-
-`field` declares a value supplied by the caller during encoding and returned
-to the caller during decoding:
-
-```text
-field apid bits 11
-field sequence-count u16
-```
-
-Version 1 has only unsigned fields.  The available types are:
-
-| Type | Wire representation |
-|------|---------------------|
-| `bits N` | An unsigned field from 1 through 64 bits wide |
-| `u8` | One octet |
-| `u16` | Two octets in the declared byte order |
-| `u32` | Four octets in the declared byte order |
-| `u64` | Eight octets in the declared byte order |
-
-The value of a field must fit its declared width.  A compiler must diagnose an
-out-of-range constant or vector value.  A generated encoder must reject an
-out-of-range caller value rather than discard its high bits.
-
-### Constant fields
-
-`constant` declares a named field whose wire value is fixed by the protocol:
-
-```text
-constant version bits 3 = 0
-constant marker u16 = 0x1acf
-```
-
-A constant is not present in the caller's value array.  The encoder emits it
-automatically.  The decoder compares the received value with it and reports a
-fixed-field fault when they differ.  Calling code decides whether that fault
-invalidates the complete record, but it cannot accidentally treat the field
-as caller-controlled data.
-
-Names such as `reserved`, `spare`, `version`, and `marker` have no special
-meaning.  Their meaning comes from the declaration and the protocol document.
-
-## Bit layout
-
-Declarations consume the wire record from left to right in source order.  No
-padding or alignment is ever inserted.
-
-`msb-first` means that the first bit occupies bit 7 of the current octet and
-subsequent bits proceed toward bit 0.  The most significant bit of a field is
-transmitted first.  A field which crosses an octet boundary continues at bit 7
-of the next octet.
-
-`lsb-first` means that the first bit occupies bit 0 of the current octet and
-subsequent bits proceed toward bit 7.  The least significant bit of a field is
-transmitted first.  A field which crosses an octet boundary continues at bit 0
-of the next octet.
-
-`byte-order` controls `u16`, `u32`, and `u64`.  It does not change the meaning
-of `bits N`; `bit-order` completely defines those fields.
+`byte_order` controls `u16`, `u32`, and `u64`. `bit_order` completely defines
+`bits` fields.
 
 The following rules prevent implicit host-layout assumptions:
 
-- A `u8`, `u16`, `u32`, or `u64` must begin on an octet boundary.
-- A message must end on an octet boundary.
-- Adjacent `bits N` declarations may cross octet boundaries.
-- The compiler reports an alignment error instead of inserting padding.
-
-The wire layout therefore remains identical on targets with different native
-endianness, integer alignment, or C structure-packing rules.
+- scalar fields must begin on an octet boundary;
+- a message must end on an octet boundary;
+- adjacent `bits` fields may cross octet boundaries; and
+- an alignment error is reported instead of inserting padding.
 
 ## Test vectors
 
-A vector belongs to the message which contains it:
+A vector has a name, a `values` object, and a `wire` octet array:
 
-```text
-vector nominal
-version = 1
-mode = 2
-sample-count = 0x1234
-wire 22 12 34
-end-vector
+```json5
+{
+  name: 'nominal',
+  values: {
+    version: 1,
+    mode: 2,
+    'sample-count': 0x1234,
+  },
+  wire: [0x22, 0x12, 0x34],
+}
 ```
 
-Every caller-supplied field must be assigned exactly once.  Constant fields
-must not be assigned.  One or more `wire` statements may be used; their octets
-are concatenated in source order.
+Every caller-supplied field must occur exactly once in `values`. Constants must
+not occur there. Value-property order has no meaning. Each `wire` element is an
+unsigned octet and the array must not be empty.
 
-Assignments may appear in any order.  Vector names must be unique within their
-message.  `field` and `constant` names share one namespace within a message.
+For every vector, `wfc`:
 
-For each vector, `wfc check` must perform both tests:
+1. Encodes `values` and compares every octet with `wire`.
+2. Decodes `wire`, compares every returned field with `values`, and verifies
+   every constant.
 
-1. Encode the assigned fields and compare every octet with `wire`.
-2. Decode `wire`, compare every returned field with its assignment, and verify
-   every constant field.
+Vectors are compile-time source tests. They are not stored in the `.wfb`. The
+format permits a private definition to omit vectors, but committed protocol
+definitions should have at least one independently derived vector per message.
 
-A mismatched size, missing field, duplicate field, unknown field, constant
-assignment, encode mismatch, or decode mismatch is an error.
+## Compiler interface
 
-Vectors are source tests.  They are not included in production generated
-data.  The `wire_format` protocol library requires at least one independently
-derived vector for every committed message, even though the source language
-allows a private definition to omit vectors.
-
-## The compiler interface
-
-The compiler is named `wfc`.  Its initial command line is:
+The C and Rust compilers implement the same interface:
 
 ```text
-wfc check protocol.wf
-wfc protocol.wf --output build/protocol
+wfc check protocol.wf.json5
+wfc protocol.wf.json5 --output build/protocol
 ```
 
-`check` stops after parsing, layout validation, and the two-way execution of
-every vector.  Otherwise compilation is implied.
+`check` stops after parsing, layout validation, and two-way execution of every
+vector. Without `check`, compilation is implied.
 
-The compiler generates `build/protocol.wfb` and `build/protocol.h`.  The `.wfb`
-is a position-independent compiled database.  The `.h` file gives names to its
-message ordinals, message and string-section offsets, string slots,
-caller-field ordinals, and fixed wire sizes.  Its constants describe the
-binary; it contains no generated functions, structures, or storage policy.
+Compilation creates `build/protocol.wfb` and `build/protocol.h`. The `.wfb` is
+a position-independent database. The header names message ordinals, record
+offsets, string sections, string slots, caller-field ordinals, and fixed wire
+sizes. It contains no generated functions or storage policy.
 
-The `.wfb` contains integer offsets rather than pointers or host-language
-structures.  An application may load it, memory-map it, embed it with
-`.incbin`, convert it to an array, or obtain it by any other means.  Those are
-application decisions and are not compiler options.
+The output is deterministic. Both implementations must produce byte-for-byte
+identical files for the same source. The conformance test enforces that rule.
+A failed compilation does not leave a mixture of old and new outputs.
 
-Message names, descriptions, encode and decode programs, and field names are
-stored as NUL-terminated strings in one common string table.  Each message has
-a string-offset section whose entries are relative offsets into that table,
-following the compiled `terminfo` model.  Test vectors are checked by `wfc`
-but are not stored in the production database.
+The compiled format accepts at most 16 caller fields in one message, matching
+`WI_MAX_PARAMS`. A caller-supplied `bits` field may be at most 63 bits because
+bit-field arithmetic uses the signed interpreter stack. An octet-aligned
+64-bit caller value uses `u64`. Constants may use all 64 bits because they are
+compiled a fragment at a time.
 
-The complete binary layout is defined in `WFB_FILE_FORMAT.md`.
+## Diagnostics and checks
 
-Output must be deterministic: the same source and compiler version produce
-byte-for-byte identical generated files.  A failed compilation must not leave
-a mixture of old and new output files.
+`wfc` rejects:
 
-The compiled format accepts at most 16 caller-supplied fields in one message,
-which matches `WI_MAX_PARAMS`.  A caller-supplied `bits N` field may be at most 63
-bits because bit-field arithmetic uses the signed interpreter stack.  An
-octet-aligned 64-bit field should be declared `u64`; constants may use all 64
-bits because they are compiled a fragment at a time.  These are diagnosed
-compiled-format limits, never silent truncations.
+- malformed JSON5 or an unsupported source version;
+- unknown, misspelled, duplicate, or missing properties;
+- invalid or duplicate identifiers;
+- empty required text, protocols, messages, or wire arrays;
+- invalid field types or widths;
+- values which do not fit their fields;
+- unaligned scalar fields or non-octet message sizes;
+- incomplete or incorrect vectors; and
+- messages exceeding a compiled-format resource limit.
 
-## Required diagnostics
-
-`wfc` rejects a file which contains any of the following:
-
-- an unsupported source-language version;
-- an unknown, misspelled, misplaced, or duplicate statement;
-- an invalid or duplicate identifier;
-- a missing required description or order declaration;
-- an empty protocol or message;
-- a field width outside its permitted range;
-- a value which does not fit its field;
-- a scalar field which is not octet-aligned;
-- a message whose final bit is not on an octet boundary;
-- a malformed or incorrect test vector; or
-- a message which exceeds a documented compiled-format resource limit.
-
-Diagnostics identify the source file and physical line.  When a particular
-token is at fault they identify its column as well.  A compiled-format limit
-is always an error; fields, messages, or vectors are never silently discarded.
+No field, message, or vector is silently discarded.
 
 ## What version 1 does not contain
 
 Version 1 has no:
 
-- a prescribed run-time loader or storage mechanism;
+- prescribed run-time loader or storage mechanism;
 - includes, macros, or conditional compilation;
 - variable-length byte fields or arrays;
 - calculated length fields;
@@ -374,8 +288,6 @@ Version 1 has no:
 - application state machines, timeouts, or retry rules; or
 - generated per-message behavioral code.
 
-These omissions are not claims that protocols do not need those features.
-They keep the first language sufficient for fixed protocol headers without
-hiding policy or unbounded work inside the format description.  A grammar
-extension requires a new `wire-format` version so an older compiler rejects it
-instead of quietly compiling a different record.
+These omissions keep the first format small and explicit. An incompatible
+source extension requires a new `wire_format` version so an older compiler
+rejects it instead of compiling a different record.

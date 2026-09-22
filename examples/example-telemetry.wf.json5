@@ -1,0 +1,42 @@
+{
+  wire_format: 1,
+
+  protocol: {
+    name: 'example-telemetry',
+    description: 'A small example used to exercise the source compiler',
+    standard: 'Example 1',
+    reference: 'doc/WF_FILE_FORMAT.md',
+
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+
+    messages: [
+      {
+        name: 'status',
+        description: 'A three-octet status record',
+
+        fields: [
+          { name: 'version', type: 'bits', width: 3 },
+
+          // This bit is emitted automatically and verified during decoding.
+          { name: 'reserved', type: 'bits', width: 1, constant: 0 },
+
+          { name: 'mode', type: 'bits', width: 4 },
+          { name: 'sample-count', type: 'u16' },
+        ],
+
+        vectors: [
+          {
+            name: 'nominal',
+            values: {
+              version: 1,
+              mode: 2,
+              'sample-count': 0x1234,
+            },
+            wire: [0x22, 0x12, 0x34],
+          },
+        ],
+      },
+    ],
+  },
+}

@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn writes_portable_sections_and_string_offsets() {
-        let source = include_str!("../../../../examples/example-telemetry.wf");
+        let source = include_str!("../../../examples/example-telemetry.wf.json5");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let compiled = protocol
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn header_names_messages_fields_and_string_sections() {
-        let source = include_str!("../../../../examples/example-telemetry.wf");
+        let source = include_str!("../../../examples/example-telemetry.wf.json5");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let generated = generate(&protocol).unwrap();
@@ -892,10 +892,23 @@ mod tests {
     fn protocol_with_u8_fields(count: usize) -> Protocol {
         let mut fields = String::new();
         for index in 0..count {
-            writeln!(fields, "field f{index} u8").unwrap();
+            writeln!(fields, "{{ name: 'f{index}', type: 'u8' }},").unwrap();
         }
         let source = format!(
-            "wire-format 1\nprotocol many\ndescription \"many\"\nbyte-order big-endian\nbit-order msb-first\nmessage record\ndescription \"record\"\n{fields}end-message\nend-protocol\n"
+            r#"{{
+  wire_format: 1,
+  protocol: {{
+    name: 'many',
+    description: 'many',
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+    messages: [{{
+      name: 'record',
+      description: 'record',
+      fields: [{fields}],
+    }}],
+  }},
+}}"#
         );
         let protocol = parse(&source).unwrap();
         check(&protocol).unwrap();

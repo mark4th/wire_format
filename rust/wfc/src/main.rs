@@ -1,5 +1,4 @@
 mod check;
-mod lexer;
 mod output;
 mod source;
 mod wfb;
@@ -122,12 +121,12 @@ fn compile_file(input: &Path, output: &Path) -> Result<(), ExitCode> {
 
 fn parse_action(arguments: &[String]) -> Result<Action, String> {
     let Some(first) = arguments.first() else {
-        return Err("expected a .wf file or the `check` command".to_owned());
+        return Err("expected a .wf.json5 file or the `check` command".to_owned());
     };
 
     if first == "check" {
         if arguments.len() != 2 {
-            return Err("`check` requires exactly one .wf file".to_owned());
+            return Err("`check` requires exactly one .wf.json5 file".to_owned());
         }
         return Ok(Action::Check {
             input: PathBuf::from(&arguments[1]),
@@ -179,6 +178,6 @@ fn plural(count: usize) -> &'static str {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("usage: {program} check protocol.wf");
-    eprintln!("       {program} protocol.wf --output path/stem");
+    eprintln!("usage: {program} check protocol.wf.json5");
+    eprintln!("       {program} protocol.wf.json5 --output path/stem");
 }

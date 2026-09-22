@@ -9,7 +9,8 @@ const MESSAGE_RECORD_SIZE: usize = 32;
 fn manifest_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("the Rust crate must be inside the repository")
+        .and_then(Path::parent)
+        .expect("the compiler crate must be inside the repository")
         .join(relative)
 }
 
@@ -95,7 +96,7 @@ fn assert_wfb_header(binary: &[u8]) {
 
 #[test]
 fn checks_the_example_source_from_the_command_line() {
-    let source = manifest_path("examples/example-telemetry.wf");
+    let source = manifest_path("examples/example-telemetry.wf.json5");
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
         .arg("check")
         .arg(source)
@@ -111,7 +112,7 @@ fn checks_the_example_source_from_the_command_line() {
 #[test]
 fn compilation_requires_an_output_stem() {
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
-        .arg("example.wf")
+        .arg("example.wf.json5")
         .output()
         .expect("wfc must run");
 
@@ -122,7 +123,7 @@ fn compilation_requires_an_output_stem() {
 #[test]
 fn language_backends_are_not_part_of_the_interface() {
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
-        .args(["example.wf", "--output", "example", "--language", "c"])
+        .args(["example.wf.json5", "--output", "example", "--language", "c"])
         .output()
         .expect("wfc must run");
 
@@ -133,7 +134,7 @@ fn language_backends_are_not_part_of_the_interface() {
 #[test]
 fn compiles_loadable_and_incbin_compatible_wfb() {
     let (directory, _stem, header, binary) =
-        compile_wfb("examples/example-telemetry.wf", "example_telemetry");
+        compile_wfb("examples/example-telemetry.wf.json5", "example_telemetry");
     assert_wfb_header(&binary);
     assert_eq!(u32_at(&binary, 16), 1);
 
@@ -178,7 +179,7 @@ fn compiles_loadable_and_incbin_compatible_wfb() {
 #[test]
 fn compiles_crossing_bits_little_endian_and_u64_metadata() {
     let (directory, _stem, _header, binary) =
-        compile_wfb("tests/data/wfc-types.wf", "compiled_types");
+        compile_wfb("tests/data/wfc-types.wf.json5", "compiled_types");
     assert_wfb_header(&binary);
     assert_eq!(u32_at(&binary, 12), 3);
     assert_eq!(u32_at(&binary, 16), 3);

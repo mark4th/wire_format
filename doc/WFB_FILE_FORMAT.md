@@ -2,10 +2,10 @@
 
 ## Purpose
 
-`wfc` compiles one human-readable `.wf` protocol description into two files:
+`wfc` compiles one human-readable `.wf.json5` protocol description into two files:
 
 ```text
-protocol.wf -> protocol.wfb + protocol.h
+protocol.wf.json5 -> protocol.wfb + protocol.h
 ```
 
 The `.wfb` contains the protocol data.  The `.h` gives symbolic names to the
@@ -157,7 +157,7 @@ The header also names fixed-field fault bit 0.  A compiled decode program
 raises this bit with `%E` when a received constant differs from its declared
 value.  Whether that is fatal remains application policy.
 
-Hyphens in `.wf` identifiers become underscores and names are converted to
+Hyphens in source identifiers become underscores and names are converted to
 uppercase.  For example, protocol `example-telemetry`, message `status`, and
 field `sample-count` produce names including:
 

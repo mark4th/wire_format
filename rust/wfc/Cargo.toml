@@ -1,0 +1,10 @@
+[package]
+name = "wfc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "JSON5 source compiler for wire_format protocol databases"
+
+[dependencies]
+json-five = "0.3"
+serde = { version = "1", features = ["derive"] }

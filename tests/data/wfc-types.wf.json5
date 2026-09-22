@@ -1,0 +1,74 @@
+{
+  wire_format: 1,
+
+  protocol: {
+    name: 'backend-test',
+    description: 'Exercises compiled field representations',
+    byte_order: 'little-endian',
+    bit_order: 'lsb-first',
+
+    messages: [
+      {
+        name: 'crossing',
+        description: 'Cross-octet bits followed by little-endian scalars',
+        fields: [
+          { name: 'first', type: 'bits', width: 5 },
+          { name: 'marker', type: 'bits', width: 2, constant: 2 },
+          { name: 'second', type: 'bits', width: 9 },
+          { name: 'count', type: 'u32' },
+          { name: 'wide', type: 'u64' },
+        ],
+        vectors: [
+          {
+            name: 'nominal',
+            values: {
+              first: 0x15,
+              second: 0x12d,
+              count: 0x12345678,
+              wide: 0xfedcba9876543210,
+            },
+            wire: [
+              0xd5, 0x96, 0x78, 0x56, 0x34, 0x12, 0x10,
+              0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+            ],
+          },
+        ],
+      },
+
+      {
+        name: 'bit63',
+        description: 'Largest signed-stack bit field',
+        fields: [
+          { name: 'value', type: 'bits', width: 63 },
+          { name: 'stop', type: 'bits', width: 1, constant: 0 },
+        ],
+        vectors: [
+          {
+            name: 'maximum',
+            values: { value: 0x7fffffffffffffff },
+            wire: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+          },
+        ],
+      },
+
+      {
+        name: 'fixed',
+        description: 'Constants with no caller fields',
+        fields: [
+          { name: 'bit-marker', type: 'bits', width: 64, constant: 0xfedcba9876543210 },
+          { name: 'scalar-marker', type: 'u64', constant: 0x0123456789abcdef },
+        ],
+        vectors: [
+          {
+            name: 'nominal',
+            values: {},
+            wire: [
+              0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+              0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+            ],
+          },
+        ],
+      },
+    ],
+  },
+}

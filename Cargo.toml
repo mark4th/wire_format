@@ -1,6 +1,6 @@
 [workspace]
-members = ["rust"]
-default-members = ["rust"]
+members = ["rust", "rust/wfc"]
+default-members = ["rust", "rust/wfc"]
 resolver = "2"
 
 [profile.release]

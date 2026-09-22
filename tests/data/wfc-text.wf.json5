@@ -1,0 +1,15 @@
+{
+  /* This fixture exercises source strings which need cleaning in a C comment. */
+  wire_format: 1,
+  protocol: {
+    name: 'text-test',
+    description: 'line\ncontrol\u0085 closes */ safely',
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+    messages: [{
+      name: 'record',
+      description: 'tab\tand */ comment delimiter',
+      fields: [{ name: 'value', type: 'u8' }],
+    }],
+  },
+}
