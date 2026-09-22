@@ -23,7 +23,7 @@
 #define DNS_HDR_LEN     12      // fixed header size
 
 // -----------------------------------------------------------------------
-// wire_format strings
+// wire_format format strings
 //
 // wi_dns_header:
 //   p1 = transaction ID  (uint16)

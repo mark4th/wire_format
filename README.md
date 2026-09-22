@@ -54,6 +54,13 @@ The caller supplies an array of `int64_t` parameters before parsing.
 Format string `%p1` pushes parameter 1 onto the stack, `%p2` pushes
 parameter 2, and so on.
 
+⚠ **Only `%p1` through `%p9` exist.**  The parser reads a single
+character after the `p` and masks it, so `%p10` is `%p1` followed by a
+literal `0` that gets emitted as a byte.  Nothing warns; the message just
+comes out wrong.  A message needing more than nine parameters is split
+into two `wi_parse()` calls on the same `wi_vars_t`, which is what the
+DNS encoder does for header + question.
+
 ### Emit specifiers
 
 | Specifier | Effect |
@@ -62,7 +69,11 @@ parameter 2, and so on.
 | `%b`      | emit 1 byte (alias for `%c`, explicit binary intent) |
 | `%w`      | emit 2 bytes big-endian (uint16) |
 | `%W`      | emit 4 bytes big-endian (uint32) |
-| `%r`      | emit raw buffer: TOS = length, next = pointer |
+| `%q`      | emit 8 bytes big-endian (uint64) |
+| `%r`/`%r1` | emit raw bytes: TOS = count, next = pointer |
+| `%r2`/`%r4` | emit a count of native uint16/uint32 elements as big-endian |
+| `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
+| `%:`      | pop a repeat count for the next `%[n]` |
 
 ### Arithmetic and logic
 
@@ -72,6 +83,170 @@ parameter 2, and so on.
 | `%&` `%\|` `%^` `%~`     | bitwise AND/OR/XOR/NOT |
 | `%A` `%O` `%!`           | logical AND/OR/NOT |
 | `%=` `%>` `%<`           | comparisons (push 0 or 1) |
+
+### Message nesting — the format string call
+
+`%[n]` embeds format string *n* of a caller-supplied table into the format
+being parsed.  It is a subroutine call: the rest of the current string is
+pushed, parsing continues inside the called one, and running off the end
+of it returns to where the call was made.
+
+```c
+static const char f_coord[] = "%p1%w%p2%w";      // a reusable sub-message
+static const char *table[]  = { f_coord };
+
+wi_init(&v, buf, sizeof buf, params, 2);
+wi_set_formats(&v, table, 1);                    // ⚠ AFTER wi_init
+wi_parse(&v, "%{170}%c%[0]%{187}%c");            // AA <coord> BB
+```
+
+A message that contains another message is written once and referenced,
+rather than copied into every format string that needs it.
+
+⚠ `wi_set_formats()` must be called **after** `wi_init()` or
+`wi_decode_init()` — both `memset` the whole struct, so setting the table
+first silently loses it.
+
+⚠ The called format shares the caller's parameters and its `a`–`z`
+variables.  Sharing parameters is deliberate: a sub-format reads the same
+array.  On **decode** it means a callee storing into `%Pa` overwrites the
+caller's `a` — give parent and child disjoint letters, or read the
+child's values out before calling again.
+
+#### Arrays — `%rN`
+
+`%rN` emits a count of elements from a buffer, big-endian like `%w` and
+`%W`:
+
+```c
+"%p1%p2%r1"    // p1 = pointer, p2 = count.  bytes
+"%p1%p2%r2"    // ...uint16 array
+"%p1%p2%r4"    // ...uint32 array
+```
+
+Bare `%r` remains an alias for `%r1`, preserving existing byte-buffer
+formats. When a digit follows `%r`, it is an element size and must be 1,
+2, or 4; any other size sets `overrun`.
+
+The multi-byte forms read native `uint16_t` or `uint32_t` elements and emit
+their values in big-endian order exactly as `%w` or `%W` does for one value.
+This produces the same wire representation on little- and big-endian hosts.
+
+★ **This is also why `%:` cannot walk an array.** A repeat runs a format
+again with the *same* parameters, so it emits one element N times.
+Walking is a property of the emitter, not of the loop — which is why the
+two are separate specifiers rather than one.
+
+---
+
+#### Repeating a call — `%:`
+
+`%:` pops a repeat count off the RPN stack and applies it to the next
+`%[n]`:
+
+```c
+"%{3}%:%[0]"          // call format 0 three times
+"%p1%:%[0]"           // ...as many times as the caller passed
+"%{2}%{3}%*%:%[0]"    // ...computed
+```
+
+Taking the count from the stack rather than baking a digit into the
+string means it is not limited to a single digit, and it can be computed
+from parameters or arithmetic.
+
+⚠ **`%:` repeats something constant.** The parameters do not advance
+between iterations, so it cannot walk an array of distinct values — use
+`%rN` for a scalar array, and a C loop calling `wi_parse()` per element
+for an array of records. That is the same rule decoding already follows.
+
+**Zero works.**  `%{0}%:%[0]` does not call at all — the count is known
+*before* the call rather than after, which a count placed at the end of a
+loop body could never manage; that shape can only give do-while.
+
+`%:` arms the *next* `%[n]`, not merely an adjacent one, so a count can
+be computed, a header emitted, and then the call made.  Every `%[n]`
+consumes it — **including one that is refused** — so a single `%:` arms
+exactly one call and a stray one cannot leak into a later.
+
+⚠ **Loop on encode; loop in C on decode.**  On encode the count is the
+sender's own data.  On decode it would come off the wire, and a format
+string cannot express "and stop if the input ran out" — the bound that
+belongs in the caller:
+
+```c
+for (i = 0; i < ancount && (size_t)(p - buf) < len; i++)
+    wi_parse(&v, wi_dns_rr);        // one fixed-size record
+```
+
+That is how the DNS decoder reads a variable number of answer records,
+and it is the right shape: the parser only ever runs a fixed-length
+format and the caller re-checks the buffer between records.
+
+---
+
+#### Nesting depth
+
+`WI_CALL_DEPTH` (default 8) bounds the call stack, and is meant to be
+set for the protocol using it — `-DWI_CALL_DEPTH=n`.  The right value is
+how deep your own message table nests, which `wi_set_formats()` measures
+and enforces; the default is a starting point, not a limit the library
+can know for you.  Each frame is a return
+address, the caller's index, the called format's start and a loop
+counter — 28 bytes, so eight frames is 224.
+
+★ **This is not the table size.**  An N-entry table *can* nest N deep,
+since every call strictly decreases the index — but almost none do, and
+refusing a forty-message protocol because it theoretically could would be
+wrong.  `wi_set_formats()` therefore measures the table's actual depth
+and refuses only a table that really would overflow the stack:
+
+```
+depth[k] = 1 + max(depth[j]) for every %[j] in format k
+```
+
+The ordering rule makes that a single pass upward from index 0 — the
+table is a DAG that is already topologically sorted, so there is no
+recursion and no cycle check to write.  A flat table of forty formats
+measures depth 1 and is accepted.
+
+---
+
+#### No forward references
+
+**A format may only call a format with a strictly lower index.**
+
+That single rule is what makes recursion impossible.  Every call
+decreases the index, the index cannot go below zero, so a call chain
+always terminates — a cyclic table is not something that runs badly, it
+is something that **cannot be written**.
+
+It covers the case that is invisible in any single format string, a cycle
+that exists only in the table:
+
+```c
+// neither of these looks wrong on its own
+static const char f_ping[] = "%{2}%c%[5]";   // index 4 calls 5  ← refused
+static const char f_pong[] = "%{3}%c%[4]";   // index 5 calls 4  ← fine
+```
+
+And it covers self-reference for free — `%[3]` inside format 3 is a cycle
+of length one, which is why the comparison is *strictly* less rather than
+"not greater".
+
+The string passed to `wi_parse()` is not in the table and ranks above all
+of it, so a top-level message may call anything.
+
+`WI_CALL_DEPTH` (8) remains as a backstop on stack usage for large
+tables; with the ordering rule it should never be the thing that stops a
+call chain.
+
+Every failure in `%[n]` is silent by design — a bad index, a forward
+reference, a `NULL` slot, no table at all, or exceeding the depth —
+because a wire encoder that aborts mid-message leaves a half-written
+buffer, which is worse than a short one that the length field already
+describes.
+
+---
 
 ### Literals
 
@@ -183,11 +358,33 @@ txid=0xa0ac  flags=0x8180  questions=1  answers=2
 
 ---
 
+## Buffer overruns
+
+Reads and writes are bounds-checked and set `v.overrun`, which stops the
+parse.
+
+⚠ Both were `assert()` before `%:` existed.  With asserts enabled that
+aborts the process; under `-DNDEBUG` it walks off the end of the buffer.
+Neither is an option for a parser fed by a network, and a counted loop
+makes both reachable from a single bad count.
+
+The return value of `wi_parse()` is the length produced, which for a
+truncated encode is a short but entirely plausible number — **`v.overrun`
+is the only thing that says it is short because the buffer ran out.**
+
+```c
+wi_init(&v, buf, sizeof buf, params, n);
+len = wi_parse(&v, fmt);
+if (v.overrun) { /* buf was too small - do not transmit len bytes */ }
+```
+
+---
+
 ## Decoding incoming messages
 
 wire_format can also walk an incoming buffer and extract field values.  The
 same RPN stack, variables, and conditional logic are available; the
-difference is that `%B`, `%S`, and `%L` *read* bytes from an input buffer
+difference is that `%B`, `%S`, `%L`, and `%Q` *read* bytes from an input buffer
 and push them onto the stack rather than popping bytes and writing them out.
 
 ### Decode specifiers
@@ -197,9 +394,24 @@ and push them onto the stack rather than popping bytes and writing them out.
 | `%B`      | read 1 byte from input → push |
 | `%S`      | read 2 bytes big-endian → push as uint16 |
 | `%L`      | read 4 bytes big-endian → push as uint32 |
+| `%Q`      | read 8 bytes big-endian → push as uint64 |
 
 Results are captured into named variables with `%Pa`, `%Pb`, ... and read
 back from `wi_vars_t.vars[]` after parsing.
+
+#### 64-bit values and the signed stack
+
+`%q` and `%Q` move all eight bytes exactly, in both directions — a value
+written with `%q` and read back with `%Q` is bit-identical.
+
+⚠ The value stack is `int64_t`, so a `uint64_t` above `INT64_MAX` is
+carried as a *negative* `int64_t`. That costs nothing when the value is
+only being moved: cast `wi_vars_t.vars[]` back to `uint64_t` at the call
+site and the bytes are right. It matters only if a format *compares* such
+a value in place with `%>`, `%<` or `%=`, which compare signed.
+
+ⓘ A 64-bit id with a small tag in its top byte never reaches that range,
+which is the usual case for this specifier.
 
 ### Initialisation
 
@@ -382,6 +594,10 @@ pointers through integer parameters, which keeps the Rust port safe while
 preserving the same stack-driven layout model. Fault policy is set with
 `WireFormat::set_abort_mask()`, and raised fault bits are available with
 `WireFormat::faults()` after a parse.
+
+The Rust port currently implements the original scalar, raw-byte, bit-field,
+conditional, and fault operations. The newer C format-call, repeat, typed-array,
+and 64-bit operations have not yet been ported.
 
 ## Files
 

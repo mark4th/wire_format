@@ -9,7 +9,7 @@
 #include "dns.h"
 
 // -----------------------------------------------------------------------
-// wire_format strings for DNS message construction
+// wire_format format strings for DNS message construction
 //
 // Header: 6 x uint16 big-endian
 //   ID | flags | QDCOUNT | ANCOUNT | NSCOUNT | ARCOUNT
@@ -26,7 +26,7 @@ const char wi_dns_header[] =
 //   p1 = pointer to encoded name, p2 = name length
 
 const char wi_dns_question[] =
-    "%p1%p2%r"      // encoded QNAME (raw bytes via pointer + length)
+    "%p1%p2%r1"     // encoded QNAME (bytes, via pointer + count)
     "%p3%w"         // QTYPE
     "%p4%w";        // QCLASS
 
@@ -93,7 +93,7 @@ size_t dns_build_query(const char *name, uint16_t qtype, uint16_t txid,
 }
 
 // -----------------------------------------------------------------------
-// wire_format strings for DNS response decoding
+// wire_format format strings for DNS response decoding
 //
 // wi_dns_resp_hdr: decode 6 x uint16 header fields
 //   results in vars[]: a=txid b=flags c=qdcount d=ancount e=nscount f=arcount
