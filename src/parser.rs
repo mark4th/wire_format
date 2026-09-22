@@ -1,14 +1,42 @@
-use crate::format::{next_op, read_fmt_byte, scan_to_else_or_end, scan_to_end};
+use crate::format::{
+    next_call, next_op, read_call_index, read_fmt_byte, scan_to_else_or_end, scan_to_end,
+};
 use crate::ops::{bit_mask, checked_usize, var_index, BinaryOp};
 use crate::param::{Param, Value};
-use crate::{Error, MAX_PARAMS, MAX_VARS, STACK_DEPTH};
+use crate::{Error, CALL_DEPTH, MAX_FORMATS, MAX_PARAMS, MAX_VARS, STACK_DEPTH};
+
+fn table_depth(formats: &[&str]) -> usize {
+    let mut depths = [0usize; MAX_FORMATS];
+    let mut deepest = 0usize;
+    let mut format_index = 0usize;
+
+    while format_index < formats.len() {
+        let mut depth = 1usize;
+        let mut pos = 0usize;
+
+        while let Some(called_index) = next_call(formats[format_index].as_bytes(), &mut pos) {
+            if called_index < format_index {
+                depth = depth.max(depths[called_index] + 1);
+            }
+        }
+
+        depths[format_index] = depth;
+        deepest = deepest.max(depth);
+        format_index += 1;
+    }
+
+    deepest
+}
 
 pub struct WireFormat<'a, 'out> {
     stack: [Value; STACK_DEPTH],
     sp: usize,
     params: [Value; MAX_PARAMS],
     raw: [Option<&'a [u8]>; MAX_PARAMS],
+    u16s: [Option<&'a [u16]>; MAX_PARAMS],
+    u32s: [Option<&'a [u32]>; MAX_PARAMS],
     vars: [Value; MAX_VARS],
+    formats: Option<&'a [&'a str]>,
     out: Option<&'out mut [u8]>,
     out_len: usize,
     input: Option<&'a [u8]>,
@@ -28,7 +56,10 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             sp: 0,
             params: [Value::Int(0); MAX_PARAMS],
             raw: [None; MAX_PARAMS],
+            u16s: [None; MAX_PARAMS],
+            u32s: [None; MAX_PARAMS],
             vars: [Value::Int(0); MAX_VARS],
+            formats: None,
             out: None,
             out_len: 0,
             input: None,
@@ -49,6 +80,14 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                 Param::Raw(bytes) => {
                     self.raw[index] = Some(bytes);
                     self.params[index] = Value::Raw(index);
+                }
+                Param::U16s(values) => {
+                    self.u16s[index] = Some(values);
+                    self.params[index] = Value::U16s(index);
+                }
+                Param::U32s(values) => {
+                    self.u32s[index] = Some(values);
+                    self.params[index] = Value::U32s(index);
                 }
             }
             index += 1;
@@ -82,7 +121,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
     fn pop_int(&mut self) -> Result<i64, Error> {
         match self.pop_value()? {
             Value::Int(value) => Ok(value),
-            Value::Raw(_) => Err(Error::TypeMismatch),
+            Value::Raw(_) | Value::U16s(_) | Value::U32s(_) => Err(Error::TypeMismatch),
         }
     }
 
@@ -118,6 +157,18 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         self.emit(value as u8)
     }
 
+    fn emit_be_u64(&mut self, value: u64) -> Result<(), Error> {
+        let mut shift = 56;
+
+        loop {
+            self.emit((value >> shift) as u8)?;
+            if shift == 0 {
+                return Ok(());
+            }
+            shift -= 8;
+        }
+    }
+
     fn read_be_u16(&mut self) -> Result<u16, Error> {
         let hi = self.read_byte()? as u16;
         let lo = self.read_byte()? as u16;
@@ -130,6 +181,18 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         let b2 = self.read_byte()? as u32;
         let b3 = self.read_byte()? as u32;
         Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+    }
+
+    fn read_be_u64(&mut self) -> Result<u64, Error> {
+        let mut value = 0u64;
+        let mut count = 0;
+
+        while count < 8 {
+            value = (value << 8) | self.read_byte()? as u64;
+            count += 1;
+        }
+
+        Ok(value)
     }
 
     fn set_var(&mut self, name: u8, value: Value) -> Result<(), Error> {
@@ -199,26 +262,70 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         self.push(Value::Int(op.apply(a, b)))
     }
 
-    fn emit_raw(&mut self) -> Result<(), Error> {
+    fn emit_array(&mut self, fmt: &[u8], pos: &mut usize) -> Result<(), Error> {
+        let mut element_size = 1u8;
+
+        if *pos < fmt.len() && fmt[*pos].is_ascii_digit() {
+            element_size = fmt[*pos] - b'0';
+            *pos += 1;
+            if !matches!(element_size, 1 | 2 | 4) {
+                return Err(Error::InvalidArrayElementSize(element_size));
+            }
+        }
+
         let raw_len = self.pop_int()?;
         let len = checked_usize(raw_len)?;
-        let raw_index = match self.pop_value()? {
-            Value::Raw(index) => index,
-            Value::Int(index) => checked_usize(index)?,
-        };
-        let raw = self
-            .raw
-            .get(raw_index)
-            .and_then(|entry| *entry)
-            .ok_or(Error::RawUnavailable)?;
-        if len > raw.len() {
-            return Err(Error::RawLength);
+        let source = self.pop_value()?;
+
+        match (element_size, source) {
+            (1, Value::Raw(index)) => {
+                let values = self
+                    .raw
+                    .get(index)
+                    .and_then(|entry| *entry)
+                    .ok_or(Error::RawUnavailable)?;
+                if len > values.len() {
+                    return Err(Error::RawLength);
+                }
+                let mut index = 0;
+                while index < len {
+                    self.emit(values[index])?;
+                    index += 1;
+                }
+            }
+            (2, Value::U16s(index)) => {
+                let values = self
+                    .u16s
+                    .get(index)
+                    .and_then(|entry| *entry)
+                    .ok_or(Error::RawUnavailable)?;
+                if len > values.len() {
+                    return Err(Error::RawLength);
+                }
+                let mut index = 0;
+                while index < len {
+                    self.emit_be_u16(values[index])?;
+                    index += 1;
+                }
+            }
+            (4, Value::U32s(index)) => {
+                let values = self
+                    .u32s
+                    .get(index)
+                    .and_then(|entry| *entry)
+                    .ok_or(Error::RawUnavailable)?;
+                if len > values.len() {
+                    return Err(Error::RawLength);
+                }
+                let mut index = 0;
+                while index < len {
+                    self.emit_be_u32(values[index])?;
+                    index += 1;
+                }
+            }
+            _ => return Err(Error::TypeMismatch),
         }
-        let mut index = 0;
-        while index < len {
-            self.emit(raw[index])?;
-            index += 1;
-        }
+
         Ok(())
     }
 
@@ -283,7 +390,11 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                 let raw = self.pop_int()?;
                 self.emit_be_u32(raw as u32)
             }
-            b'r' => self.emit_raw(),
+            b'q' => {
+                let raw = self.pop_int()?;
+                self.emit_be_u64(raw as u64)
+            }
+            b'r' => self.emit_array(fmt, pos),
             b'B' => {
                 let value = self.read_byte()?;
                 self.push(Value::Int(value as i64))
@@ -294,6 +405,10 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             }
             b'L' => {
                 let value = self.read_be_u32()?;
+                self.push(Value::Int(value as i64))
+            }
+            b'Q' => {
+                let value = self.read_be_u64()?;
                 self.push(Value::Int(value as i64))
             }
             b'x' => self.encode_bit_field(),
@@ -344,17 +459,100 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         parser
     }
 
+    /// Sets the format table addressed by `%[n]`.
+    ///
+    /// A table entry may call only a lower-numbered entry. This makes cycles
+    /// impossible and permits the actual maximum nesting depth to be checked
+    /// here without recursion or allocation.
+    pub fn set_formats(&mut self, formats: &'a [&'a str]) -> Result<(), Error> {
+        if formats.len() > MAX_FORMATS {
+            return Err(Error::TooManyFormats);
+        }
+        if !formats.is_empty() && table_depth(formats) + 1 > CALL_DEPTH {
+            return Err(Error::FormatCallDepth);
+        }
+        self.formats = Some(formats);
+        Ok(())
+    }
+
     pub fn parse(&mut self, fmt: &str) -> Result<usize, Error> {
         self.out_len = 0;
         self.faults = 0;
-        let fmt = fmt.as_bytes();
-        let mut pos = 0;
-        while pos < fmt.len() {
-            let byte = fmt[pos];
+        let formats = self.formats.unwrap_or(&[]);
+        let mut current = fmt.as_bytes();
+        let mut current_index = formats.len();
+        let mut pos = 0usize;
+        let mut pending = 1i64;
+        let mut return_formats: [Option<&[u8]>; CALL_DEPTH] = [None; CALL_DEPTH];
+        let mut return_positions = [0usize; CALL_DEPTH];
+        let mut return_indices = [0usize; CALL_DEPTH];
+        let mut start_formats: [Option<&[u8]>; CALL_DEPTH] = [None; CALL_DEPTH];
+        let mut repeats_left = [0i64; CALL_DEPTH];
+        let mut rsp = 0usize;
+
+        loop {
+            if pos >= current.len() {
+                if rsp == 0 {
+                    break;
+                }
+
+                if repeats_left[rsp - 1] > 0 {
+                    repeats_left[rsp - 1] -= 1;
+                    current = start_formats[rsp - 1].ok_or(Error::FormatCallDepth)?;
+                    pos = 0;
+                    continue;
+                }
+
+                rsp -= 1;
+                current = return_formats[rsp].ok_or(Error::FormatCallDepth)?;
+                pos = return_positions[rsp];
+                current_index = return_indices[rsp];
+                continue;
+            }
+
+            let byte = current[pos];
             pos += 1;
             if byte == b'%' {
-                let op = next_op(fmt, &mut pos)?;
-                self.apply_op(op, fmt, &mut pos)?;
+                let op = next_op(current, &mut pos)?;
+
+                if op == b':' {
+                    pending = self.pop_int()?;
+                    continue;
+                }
+
+                if op == b'[' {
+                    let count = pending;
+                    pending = 1;
+                    let called_index = match read_call_index(current, &mut pos) {
+                        Some(index) => index,
+                        None => continue,
+                    };
+                    let called = match formats.get(called_index) {
+                        Some(format) => format.as_bytes(),
+                        None => continue,
+                    };
+
+                    if called_index >= current_index || count <= 0 {
+                        continue;
+                    }
+                    if rsp >= CALL_DEPTH {
+                        return Err(Error::FormatCallDepth);
+                    }
+
+                    return_formats[rsp] = Some(current);
+                    return_positions[rsp] = pos;
+                    return_indices[rsp] = current_index;
+                    start_formats[rsp] = Some(called);
+                    repeats_left[rsp] = count - 1;
+                    rsp += 1;
+
+                    current = called;
+                    current_index = called_index;
+                    pos = 0;
+                    continue;
+                }
+
+                self.apply_op(op, current, &mut pos)?;
             } else {
                 self.emit(byte)?;
             }
@@ -392,7 +590,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
     pub fn int_var(&self, name: u8) -> Option<i64> {
         match self.var_value(name).ok()? {
             Value::Int(value) => Some(value),
-            Value::Raw(_) => None,
+            Value::Raw(_) | Value::U16s(_) | Value::U32s(_) => None,
         }
     }
 }

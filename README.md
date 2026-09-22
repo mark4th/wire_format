@@ -589,15 +589,29 @@ cargo run --example telemetry_demo
 ```
 
 The Rust API keeps message definitions as strings and uses caller-supplied
-buffers. Raw byte emission uses `Param::Raw(&bytes)` instead of passing raw
-pointers through integer parameters, which keeps the Rust port safe while
-preserving the same stack-driven layout model. Fault policy is set with
-`WireFormat::set_abort_mask()`, and raised fault bits are available with
-`WireFormat::faults()` after a parse.
+buffers. It implements the same scalar, bit-field, conditional, fault,
+format-call, repeat, typed-array, and 64-bit operations as the C parser.
 
-The Rust port currently implements the original scalar, raw-byte, bit-field,
-conditional, and fault operations. The newer C format-call, repeat, typed-array,
-and 64-bit operations have not yet been ported.
+The APIs differ where Rust can retain the type information which C receives as
+a pointer:
+
+```rust
+let params = [
+    Param::Raw(&bytes),       // use with %r or %r1
+    Param::from(bytes.len()),
+    Param::U16s(&shorts),     // use with %r2
+    Param::from(shorts.len()),
+    Param::U32s(&longs),      // use with %r4
+    Param::from(longs.len()),
+];
+```
+
+`WireFormat::set_formats(&formats)` supplies the table used by `%[n]` and
+checks the actual nesting depth before parsing. The implementation uses a fixed
+return stack and remains `no_std` and allocation-free. Buffer exhaustion is a
+Rust `Error::OutputFull` or `Error::InputEof` rather than C's `overrun` flag.
+Fault policy is set with `WireFormat::set_abort_mask()`, and raised fault bits
+are available with `WireFormat::faults()` after a parse.
 
 ## Files
 

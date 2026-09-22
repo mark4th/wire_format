@@ -28,6 +28,64 @@ fn emits_raw_parameter() {
 }
 
 #[test]
+fn emits_typed_arrays_in_big_endian_order() {
+    let bytes = [0x11, 0x22, 0x33];
+    let shorts = [0x1122, 0x3344, 0x5566];
+    let longs = [0x1122_3344, 0x5566_7788];
+    let params = [
+        Param::Raw(&bytes),
+        Param::from(bytes.len()),
+        Param::U16s(&shorts),
+        Param::from(shorts.len()),
+        Param::U32s(&longs),
+        Param::from(longs.len()),
+    ];
+    let mut out = [0u8; 17];
+    let mut wf = WireFormat::new_encode(&mut out, &params);
+
+    wf.parse("%p1%p2%r%p3%p4%r2%p5%p6%r4").unwrap();
+
+    assert_eq!(
+        wf.output(),
+        &[
+            0x11, 0x22, 0x33, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88,
+        ]
+    );
+}
+
+#[test]
+fn rejects_bad_array_size_and_array_type() {
+    let bytes = [0x11, 0x22];
+    let params = [Param::Raw(&bytes), Param::from(bytes.len())];
+    let mut out = [0u8; 4];
+    let mut wf = WireFormat::new_encode(&mut out, &params);
+
+    assert_eq!(
+        wf.parse("%p1%p2%r3"),
+        Err(Error::InvalidArrayElementSize(3))
+    );
+    assert_eq!(wf.parse("%p1%p2%r2"), Err(Error::TypeMismatch));
+}
+
+#[test]
+fn encodes_and_decodes_u64() {
+    let params = [Param::from(0xffee_ddcc_bbaa_9988u64)];
+    let mut out = [0u8; 8];
+    let mut enc = WireFormat::new_encode(&mut out, &params);
+
+    enc.parse("%p1%q").unwrap();
+    assert_eq!(
+        enc.output(),
+        &[0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88]
+    );
+
+    let mut dec = WireFormat::new_decode(enc.output(), &[]);
+    dec.parse("%Q%Pa").unwrap();
+    assert_eq!(dec.int_var(b'a').unwrap() as u64, 0xffee_ddcc_bbaa_9988);
+}
+
+#[test]
 fn fixed_width_emit_truncates_like_c() {
     let mut out = [0u8; 6];
     let params = [Param::from(0x12345u32), Param::from(0x1_2345_6789i64)];
@@ -130,4 +188,68 @@ fn fault_operator_can_abort_decode_after_bad_magic() {
     assert_eq!(wf.input_pos(), 1);
     assert_eq!(wf.int_var(b'a'), Some(0));
     assert_eq!(wf.faults(), 1);
+}
+
+#[test]
+fn calls_and_repeats_formats() {
+    let formats = ["%{1}%b", "%{2}%b%[0]"];
+    let mut out = [0u8; 8];
+    let mut wf = WireFormat::new_encode(&mut out, &[]);
+
+    wf.set_formats(&formats).unwrap();
+    let len = wf.parse("%{3}%:%[1]").unwrap();
+
+    assert_eq!(len, 6);
+    assert_eq!(wf.output(), &[2, 1, 2, 1, 2, 1]);
+}
+
+#[test]
+fn format_call_returns_to_decode_caller() {
+    let formats = ["%S%Pa%S%Pb"];
+    let input = [0, 7, 0, 9, 0, 42];
+    let mut wf = WireFormat::new_decode(&input, &[]);
+
+    wf.set_formats(&formats).unwrap();
+    wf.parse("%[0]%S%Pc").unwrap();
+
+    assert_eq!(wf.int_var(b'a'), Some(7));
+    assert_eq!(wf.int_var(b'b'), Some(9));
+    assert_eq!(wf.int_var(b'c'), Some(42));
+    assert_eq!(wf.input_pos(), input.len());
+}
+
+#[test]
+fn format_calls_refuse_forward_and_self_references() {
+    let formats = ["%{1}%b%[1]", "%{2}%b%[1]"];
+    let mut out = [0u8; 4];
+    let mut wf = WireFormat::new_encode(&mut out, &[]);
+
+    wf.set_formats(&formats).unwrap();
+    wf.parse("%[0]%[1]").unwrap();
+
+    assert_eq!(wf.output(), &[1, 2]);
+}
+
+#[test]
+fn validates_format_table_limits_and_depth() {
+    let too_many = [""; crate::MAX_FORMATS + 1];
+    let too_deep = ["", "%[0]", "%[1]", "%[2]", "%[3]", "%[4]", "%[5]", "%[6]"];
+    let mut out = [0u8; 1];
+    let mut wf = WireFormat::new_encode(&mut out, &[]);
+
+    assert_eq!(wf.set_formats(&too_many), Err(Error::TooManyFormats));
+    assert_eq!(wf.set_formats(&too_deep), Err(Error::FormatCallDepth));
+}
+
+#[test]
+fn fault_inside_called_format_obeys_abort_mask() {
+    let formats = ["%{4}%E%{88}%b"];
+    let mut out = [0u8; 1];
+    let mut wf = WireFormat::new_encode(&mut out, &[]);
+
+    wf.set_formats(&formats).unwrap();
+    wf.set_abort_mask(4);
+    assert_eq!(wf.parse("%[0]"), Err(Error::FaultAbort(4)));
+    assert_eq!(wf.output(), &[]);
+    assert_eq!(wf.faults(), 4);
 }
