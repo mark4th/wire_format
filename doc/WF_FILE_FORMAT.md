@@ -117,7 +117,8 @@ end-protocol
 `description` is required for the protocol.  `standard` and `reference` are
 optional and may each occur once.  A file must contain at least one message.
 Statements occur in the order shown.  When both optional statements are
-present, `standard` precedes `reference`.
+present, `standard` precedes `reference`.  A description, standard, or
+reference which is present must contain something other than whitespace.
 
 `byte-order` and `bit-order` are required even when a file currently uses only
 one-octet fields.  An omitted order is an ambiguity, not permission for the

@@ -3,6 +3,12 @@
 The human-readable protocol source language is defined in
 [doc/WF_FILE_FORMAT.md](doc/WF_FILE_FORMAT.md).
 
+The source checker can be run directly through Cargo:
+
+```sh
+cargo run --bin wfc -- check examples/example-telemetry.wf
+```
+
 ## What it is
 
 wire_format is a compact, data-driven binary protocol encoder built around a
