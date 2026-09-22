@@ -7,7 +7,10 @@ const HEADER_SIZE: usize = 64;
 const MESSAGE_RECORD_SIZE: usize = 32;
 
 fn manifest_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the Rust crate must be inside the repository")
+        .join(relative)
 }
 
 fn assert_success(output: &std::process::Output, operation: &str) {
@@ -153,7 +156,7 @@ fn compiles_loadable_and_incbin_compatible_wfb() {
         .current_dir(&directory)
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
         .arg("-I")
-        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg(manifest_path("."))
         .arg("-I")
         .arg(&directory)
         .arg(manifest_path("tests/wfc_wfb_harness.c"))

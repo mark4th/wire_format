@@ -1,0 +1,9 @@
+[package]
+name = "wire_format"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust format-string driven binary protocol encoder/decoder"
+
+[features]
+default = []

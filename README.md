@@ -671,19 +671,21 @@ are available with `WireFormat::faults()` after a parse.
 | `dns.h`         | DNS constants and format string declarations |
 | `dns.c`         | DNS query construction and response parsing |
 | `dns_demo.c`    | C command-line DNS demo |
-| `Cargo.toml`    | Rust crate manifest |
-| `src/lib.rs`    | Rust crate facade and public re-exports |
-| `src/error.rs`  | Rust error type |
-| `src/param.rs`  | Rust public parameters and internal stack values |
-| `src/format.rs` | Rust format-string scanner helpers |
-| `src/ops.rs`    | Rust arithmetic, variable, and bit-field helpers |
-| `src/parser.rs` | Rust `WireFormat` parser engine |
-| `src/tests.rs`  | Rust unit tests |
-| `src/bin/wfc/` | `.wf` lexer, parser, checker, `.wfb` compiler, and atomic output writer |
+| `Cargo.toml` | Cargo workspace manifest |
+| `rust/Cargo.toml` | Rust crate manifest |
+| `rust/src/lib.rs` | Rust crate facade and public re-exports |
+| `rust/src/error.rs` | Rust error type |
+| `rust/src/param.rs` | Rust public parameters and internal stack values |
+| `rust/src/format.rs` | Rust format-string scanner helpers |
+| `rust/src/ops.rs` | Rust arithmetic, variable, and bit-field helpers |
+| `rust/src/parser.rs` | Rust `WireFormat` parser engine |
+| `rust/src/tests.rs` | Rust unit tests |
+| `rust/src/bin/wfc/` | `.wf` lexer, parser, checker, `.wfb` compiler, and atomic output writer |
+| `rust/tests/wfc_cli.rs` | `wfc` command-line and `.incbin` integration tests |
 | `doc/WF_FILE_FORMAT.md` | normative `.wf` source-language definition |
 | `doc/WFB_FILE_FORMAT.md` | normative compiled binary format |
 | `examples/example-telemetry.wf` | checked and compiled `.wf` example |
-| `examples/telemetry_demo.rs` | Rust protocol-frame demo |
+| `rust/examples/telemetry_demo.rs` | Rust protocol-frame demo |
 
 ---
 
