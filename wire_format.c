@@ -132,12 +132,51 @@ static void _brace(wi_vars_t *wi)
 }
 
 // -----------------------------------------------------------------------
-// %p1..%p9  push parameter
+// %p1..%p9 or %p{1}..%p{WI_MAX_PARAMS}  push parameter
 
 static void _p(wi_vars_t *wi)
 {
-    uint8_t c1 = *wi->f_str++ & 0x0f;
-    fs_push(wi, wi->params[c1 - 1]);
+    size_t index = 0;
+
+    if (*wi->f_str == '{')
+    {
+        wi->f_str++;
+        if (*wi->f_str < '0' || *wi->f_str > '9')
+        {
+            wi->overrun = 1;
+            return;
+        }
+        while (*wi->f_str >= '0' && *wi->f_str <= '9')
+        {
+            index = (index * 10) + (size_t)(*wi->f_str++ - '0');
+            if (index > WI_MAX_PARAMS)
+            {
+                wi->overrun = 1;
+                return;
+            }
+        }
+        if (*wi->f_str++ != '}')
+        {
+            wi->overrun = 1;
+            return;
+        }
+    }
+    else if (*wi->f_str >= '1' && *wi->f_str <= '9')
+    {
+        index = (size_t)(*wi->f_str++ - '0');
+    }
+    else
+    {
+        wi->overrun = 1;
+        return;
+    }
+
+    if (index == 0 || index > WI_MAX_PARAMS)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    fs_push(wi, wi->params[index - 1]);
 }
 
 // -----------------------------------------------------------------------

@@ -9,6 +9,22 @@ The source checker can be run directly through Cargo:
 cargo run --bin wfc -- check examples/example-telemetry.wf
 ```
 
+With no `check` command, compilation is implied.  The compiler emits a
+position-independent binary database and its symbolic C header:
+
+```sh
+cargo run --bin wfc -- examples/example-telemetry.wf \
+    --output build/example_telemetry
+```
+
+This creates `build/example_telemetry.wfb` and `build/example_telemetry.h`.
+The binary may be read from storage, copied to memory, or embedded verbatim
+with an assembler `.incbin`.  The application chooses how it stores and finds
+the bytes.  `wfc` does not generate a loader or impose a linking policy.
+
+The compiled binary layout is defined in
+[doc/WFB_FILE_FORMAT.md](doc/WFB_FILE_FORMAT.md).
+
 ## What it is
 
 wire_format is a compact, data-driven binary protocol encoder built around a
@@ -61,14 +77,17 @@ bitwise logic, and conditional branching.
 
 The caller supplies an array of `int64_t` parameters before parsing.
 Format string `%p1` pushes parameter 1 onto the stack, `%p2` pushes
-parameter 2, and so on.
+parameter 2, and so on.  The compact spelling exists for parameters 1
+through 9.  Braces address the complete parameter array:
 
-⚠ **Only `%p1` through `%p9` exist.**  The parser reads a single
-character after the `p` and masks it, so `%p10` is `%p1` followed by a
-literal `0` that gets emitted as a byte.  Nothing warns; the message just
-comes out wrong.  A message needing more than nine parameters is split
-into two `wi_parse()` calls on the same `wi_vars_t`, which is what the
-DNS encoder does for header + question.
+```text
+%p{1}   %p{9}   %p{10}   ...   %p{16}
+```
+
+Generated formats always use the braced spelling.  `%p10` does **not** mean
+parameter 10: it retains its original interpretation as `%p1` followed by an
+ordinary ASCII `0` byte (`0x30`).  A zero, empty, malformed, or out-of-range
+braced index is rejected instead of indexing outside the parameter array.
 
 ### Emit specifiers
 
@@ -530,6 +549,27 @@ After parsing, `v.vars[0]` holds the version and `v.vars[1]` holds IHL.
 
 ---
 
+## Compiled protocol database
+
+`wfc` turns a `.wf` source into one `.wfb` database.  The file contains a fixed
+header, one fixed-size record per message, field-value metadata, an array of
+string offsets, and one common string table.  Every location stored in the
+file is an integer offset.  It contains no pointers, native C structures, or
+host alignment.
+
+The associated `.h` names message ordinals, message-record offsets,
+string-section offsets, string slots, caller-field ordinals, and fixed wire
+sizes.  A message string section contains offsets into the common string table,
+following the same indirection used by compiled `terminfo` entries.  It holds
+the message name, description, encode and decode programs, and field names.
+
+How an application makes the `.wfb` bytes available is deliberately not part
+of the format.  A hosted application can load the file.  Firmware can place it
+in flash with `.incbin`, package it in another image, or copy it from external
+storage.  All of those choices expose the same bytes to the interpreter.
+
+---
+
 ## Extending to a new protocol
 
 Adding a new message type requires:
@@ -639,6 +679,10 @@ are available with `WireFormat::faults()` after a parse.
 | `src/ops.rs`    | Rust arithmetic, variable, and bit-field helpers |
 | `src/parser.rs` | Rust `WireFormat` parser engine |
 | `src/tests.rs`  | Rust unit tests |
+| `src/bin/wfc/` | `.wf` lexer, parser, checker, `.wfb` compiler, and atomic output writer |
+| `doc/WF_FILE_FORMAT.md` | normative `.wf` source-language definition |
+| `doc/WFB_FILE_FORMAT.md` | normative compiled binary format |
+| `examples/example-telemetry.wf` | checked and compiled `.wf` example |
 | `examples/telemetry_demo.rs` | Rust protocol-frame demo |
 
 ---

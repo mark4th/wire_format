@@ -29,7 +29,7 @@ int main(void)
 {
     wi_vars_t v;
     uint8_t buf[64];
-    int64_t p[4];
+    int64_t p[WI_MAX_PARAMS] = { 0 };
     size_t n;
 
     // ---- a call in the middle of a format ----
@@ -42,6 +42,18 @@ int main(void)
     ck("coord hi", (buf[1] << 8) | buf[2], 0x1122);
     ck("coord lo", (buf[3] << 8) | buf[4], 0x3344);
     ck("byte 5 = 0xBB", buf[5], 0xBB);
+
+    // ---- braced parameter numbers extend the unambiguous one-digit form ----
+    printf("PARAMETERS\n");
+    p[9] = 0x5a;
+    wi_init(&v, buf, sizeof buf, p, 10);
+    n = wi_parse(&v, "%p{10}%b%p1%b");
+    ck("braced parameter 10", n, 2);
+    ck("  p10 then p1", (buf[0] == 0x5a) && (buf[1] == 0x22), 1);
+
+    wi_init(&v, buf, sizeof buf, p, 10);
+    wi_parse(&v, "%p{0}%b");
+    ck("parameter zero refused", v.overrun, 1);
 
     // ---- two calls, and a call after a call ----
     wi_init(&v, buf, sizeof buf, p, 2);

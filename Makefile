@@ -17,7 +17,7 @@ quad_test: quad_test.c wire_format.c
 call_test: call_test.c wire_format.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: call_test quad_test
+test: $(TESTS)
 	./call_test
 	./quad_test
 

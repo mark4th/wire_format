@@ -207,11 +207,41 @@ impl<'a, 'out> WireFormat<'a, 'out> {
     }
 
     fn push_param(&mut self, fmt: &[u8], pos: &mut usize) -> Result<(), Error> {
-        let digit = read_fmt_byte(fmt, pos)?;
-        if !(b'1'..=b'9').contains(&digit) {
+        let first = read_fmt_byte(fmt, pos)?;
+        let index = if first == b'{' {
+            let mut value = 0usize;
+            let mut saw_digit = false;
+            loop {
+                let byte = read_fmt_byte(fmt, pos)?;
+                if byte == b'}' {
+                    break;
+                }
+                if !byte.is_ascii_digit() {
+                    return Err(Error::InvalidParam);
+                }
+                saw_digit = true;
+                value = value
+                    .checked_mul(10)
+                    .and_then(|number| number.checked_add((byte - b'0') as usize))
+                    .ok_or(Error::InvalidParam)?;
+                if value > MAX_PARAMS {
+                    return Err(Error::InvalidParam);
+                }
+            }
+            if !saw_digit {
+                return Err(Error::InvalidParam);
+            }
+            value
+        } else if (b'1'..=b'9').contains(&first) {
+            (first - b'0') as usize
+        } else {
+            return Err(Error::InvalidParam);
+        };
+
+        if index == 0 || index > MAX_PARAMS {
             return Err(Error::InvalidParam);
         }
-        self.push(self.params[(digit - b'1') as usize])
+        self.push(self.params[index - 1])
     }
 
     fn push_char_literal(&mut self, fmt: &[u8], pos: &mut usize) -> Result<(), Error> {

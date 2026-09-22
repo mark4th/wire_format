@@ -62,17 +62,23 @@ fn ensure_text(text: &str, what: &str, location: crate::source::Location) -> Res
             message: format!("{what} may not be empty"),
         });
     }
+    if text.as_bytes().contains(&0) {
+        return Err(Diagnostic {
+            location,
+            message: format!("{what} may not contain a NUL octet"),
+        });
+    }
     Ok(())
 }
 
 #[derive(Debug)]
-struct Layout {
-    offsets: Vec<usize>,
-    octets: usize,
+pub struct Layout {
+    pub offsets: Vec<usize>,
+    pub octets: usize,
 }
 
 impl Layout {
-    fn new(message: &Message) -> Result<Self> {
+    pub fn new(message: &Message) -> Result<Self> {
         let mut offsets = Vec::with_capacity(message.fields.len());
         let mut bit_offset = 0usize;
 
@@ -485,5 +491,12 @@ end-protocol
 "#;
         let error = checked(source).unwrap_err();
         assert!(error.message.contains("does not fit in a 3-bit field"));
+    }
+
+    #[test]
+    fn rejects_nul_in_compiled_text() {
+        let source = "wire-format 1\nprotocol bad\ndescription \"bad\0text\"\nbyte-order big-endian\nbit-order msb-first\nmessage header\ndescription \"header\"\nfield value u8\nend-message\nend-protocol\n";
+        let error = checked(source).unwrap_err();
+        assert!(error.message.contains("may not contain a NUL octet"));
     }
 }

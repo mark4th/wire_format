@@ -3,13 +3,13 @@
 ## Purpose
 
 A `.wf` file is the human-readable description of the wire layout used by
-one protocol.  `wfc` reads that description, checks it, and generates constant
-data that an application compiles and links with `wire_format`.
+one protocol.  `wfc` reads that description, checks it, and generates a
+compiled `.wfb` database plus a header naming its contents.
 
-The source file is the protocol database.  There is no installed binary
-database and no run-time search for a protocol description.  An application
-which implements one protocol compiles that protocol's generated data into
-its executable.
+The application decides how the compiled database is made available.  It may
+load the `.wfb`, embed it in an executable, or place it in firmware storage.
+The source language and compiler do not add run-time protocol discovery or
+choose a storage mechanism.
 
 A `.wf` file describes how records are represented on the wire.  It does not
 describe what an application does with a record, when it sends one, how it
@@ -81,8 +81,8 @@ A `.wf` file is UTF-8 text.  The language keywords and identifiers use ASCII.
   Every octet is written as exactly two hexadecimal digits without `0x`.
 
 Identifiers are part of the generated interface and are therefore stable
-names, not prose labels.  A backend changes hyphens to underscores when it
-needs a C or Rust identifier.
+names, not prose labels.  The generated C header changes hyphens to
+underscores.
 
 ## File structure
 
@@ -303,43 +303,41 @@ The compiler is named `wfc`.  Its initial command line is:
 
 ```text
 wfc check protocol.wf
-wfc c protocol.wf --output build/protocol
-wfc rust protocol.wf --output build/protocol.rs
+wfc protocol.wf --output build/protocol
 ```
 
-The C command generates `build/protocol.h` and `build/protocol.c`.  The target's
-normal C compiler turns the generated C file into a linkable object.  `wfc`
-does not guess the target ABI or invoke a compiler behind the application's
-back.
+`check` stops after parsing, layout validation, and the two-way execution of
+every vector.  Otherwise compilation is implied.
 
-The Rust command generates one source module which is compiled as an ordinary
-part of the application.  It must remain usable by a `no_std` application.
+The compiler generates `build/protocol.wfb` and `build/protocol.h`.  The `.wfb`
+is a position-independent compiled database.  The `.h` file gives names to its
+message ordinals, message and string-section offsets, string slots,
+caller-field ordinals, and fixed wire sizes.  Its constants describe the
+binary; it contains no generated functions, structures, or storage policy.
 
-Both backends generate the same logical information:
+The `.wfb` contains integer offsets rather than pointers or host-language
+structures.  An application may load it, memory-map it, embed it with
+`.incbin`, convert it to an array, or obtain it by any other means.  Those are
+application decisions and are not compiler options.
 
-- one immutable descriptor for each message;
-- the fixed wire size of each message;
-- the caller-field count and declaration order;
-- named field ordinals so an application does not use unexplained numbers;
-- compiled encode and decode formats; and
-- the constant-field checks used during decoding.
+Message names, descriptions, encode and decode programs, and field names are
+stored as NUL-terminated strings in one common string table.  Each message has
+a string-offset section whose entries are relative offsets into that table,
+following the compiled `terminfo` model.  Test vectors are checked by `wfc`
+but are not stored in the production database.
 
-The common run-time interface accepts a message descriptor and an array of
-unsigned 64-bit field values.  Encoding reads that array in declaration order.
-Decoding writes it in the same order.  The generated C header or Rust module
-provides the field ordinals and sizes used to build that array.
-
-Generated protocol data is immutable.  Parser state, input and output buffers,
-field values, faults, and cursors remain caller-owned.  The same descriptor may
-therefore be used concurrently by any number of callers without a lock.
-
-Descriptions, references, field names, and test vectors are not stored in the
-production object.  They remain in the `.wf` source and generated header or
-module comments, where they cost no target data space.
+The complete binary layout is defined in `WFB_FILE_FORMAT.md`.
 
 Output must be deterministic: the same source and compiler version produce
 byte-for-byte identical generated files.  A failed compilation must not leave
 a mixture of old and new output files.
+
+The compiled format accepts at most 16 caller-supplied fields in one message,
+which matches `WI_MAX_PARAMS`.  A caller-supplied `bits N` field may be at most 63
+bits because bit-field arithmetic uses the signed interpreter stack.  An
+octet-aligned 64-bit field should be declared `u64`; constants may use all 64
+bits because they are compiled a fragment at a time.  These are diagnosed
+compiled-format limits, never silent truncations.
 
 ## Required diagnostics
 
@@ -355,17 +353,17 @@ a mixture of old and new output files.
 - a scalar field which is not octet-aligned;
 - a message whose final bit is not on an octet boundary;
 - a malformed or incorrect test vector; or
-- a message which exceeds a documented backend resource limit.
+- a message which exceeds a documented compiled-format resource limit.
 
 Diagnostics identify the source file and physical line.  When a particular
-token is at fault they identify its column as well.  A backend limit is always
-an error; fields, messages, or vectors are never silently discarded.
+token is at fault they identify its column as well.  A compiled-format limit
+is always an error; fields, messages, or vectors are never silently discarded.
 
 ## What version 1 does not contain
 
 Version 1 has no:
 
-- run-time protocol discovery or loading;
+- a prescribed run-time loader or storage mechanism;
 - includes, macros, or conditional compilation;
 - variable-length byte fields or arrays;
 - calculated length fields;

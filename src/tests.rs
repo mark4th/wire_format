@@ -18,6 +18,31 @@ fn encodes_dns_header() {
 }
 
 #[test]
+fn addresses_parameters_beyond_nine_with_braces() {
+    let params = [
+        Param::Int(1),
+        Param::Int(2),
+        Param::Int(3),
+        Param::Int(4),
+        Param::Int(5),
+        Param::Int(6),
+        Param::Int(7),
+        Param::Int(8),
+        Param::Int(9),
+        Param::Int(10),
+    ];
+    let mut output = [0u8; 2];
+    let mut wf = WireFormat::new_encode(&mut output, &params);
+    assert_eq!(wf.parse("%p{10}%b%p1%b").unwrap(), 2);
+    assert_eq!(output, [10, 1]);
+
+    let mut output = [0u8; 1];
+    let mut wf = WireFormat::new_encode(&mut output, &params);
+    assert_eq!(wf.parse("%p{0}%b"), Err(Error::InvalidParam));
+    assert_eq!(wf.parse("%p{17}%b"), Err(Error::InvalidParam));
+}
+
+#[test]
 fn emits_raw_parameter() {
     let payload = [0xde, 0xad, 0xbe, 0xef];
     let mut out = [0u8; 6];
