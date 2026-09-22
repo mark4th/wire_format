@@ -7,21 +7,21 @@ Build and run the C compiler with:
 
 ```sh
 make wfc
-./wfc check examples/example-telemetry.wf.json5
+./wfc check examples/source-format/example-telemetry.wf.json5
 ```
 
 With no `check` command, compilation is implied.  The compiler emits a
 position-independent binary database and its symbolic C header:
 
 ```sh
-./wfc examples/example-telemetry.wf.json5 \
+./wfc examples/source-format/example-telemetry.wf.json5 \
     --output build/example_telemetry
 ```
 
 An independent Rust implementation has the same interface:
 
 ```sh
-cargo run -p wfc -- check examples/example-telemetry.wf.json5
+cargo run -p wfc -- check examples/source-format/example-telemetry.wf.json5
 ```
 
 The C compiler carries its JSON5 parser under `compiler/`. The Rust compiler's
@@ -38,11 +38,13 @@ The compiled binary layout is defined in
 
 ## What it is
 
-wire_format is a compact, data-driven binary protocol encoder built around a
-format string interpreter.  Each message type in a protocol is described by
-a short format string literal baked into the executable.  A single generic
-parser walks the string and emits the correct wire bytes.  No special
-handler function is needed per message type.
+wire_format is a compact, data-driven binary protocol encoder and decoder built
+around a format string interpreter. Each message type is described in a
+`.wf.json5` source file. `wfc` checks the source and compiles it into a `.wfb`
+database containing encode and decode programs plus descriptive metadata. A
+single generic parser executes those programs; no special codec function is
+needed per message type. Small applications may still use format strings
+directly without the source compiler.
 
 The approach is directly inspired by terminfo, the UNIX terminal capability
 database, which uses format strings and an RPN stack to describe how to
@@ -62,15 +64,15 @@ but has a real cost:
 - Bugs in encoding logic tend to be duplicated across similar message
   types because each is hand-rolled independently.
 
-wire_format inverts this.  The parser is written once.  Adding a new message
-type means adding a format string — a string literal that describes the wire
-layout.  No new code path, no new function, no new test surface for the
-encoding machinery itself.
+wire_format inverts this. The parser is written once. Adding a new message type
+means adding a declarative record to the protocol source; the compiler produces
+the format programs and metadata. No new codec path or message-specific
+function is added to the encoding machinery.
 
 This matters most in embedded systems and protocol implementations where
-message types accumulate over time.  A growing protocol does not require
-a growing set of encoder functions; it requires a growing table of
-format strings.
+message types accumulate over time. A growing protocol does not require a
+growing set of encoder and decoder functions; it grows the compiled protocol
+database instead.
 
 ---
 
@@ -214,7 +216,7 @@ belongs in the caller:
 
 ```c
 for (i = 0; i < ancount && (size_t)(p - buf) < len; i++)
-    wi_parse(&v, wi_dns_rr);        // one fixed-size record
+    wi_parse(&v, resource_record_format);  // one fixed-size record
 ```
 
 That is how the DNS decoder reads a variable number of answer records,
@@ -336,10 +338,11 @@ policy and is left unchanged.
 ## The DNS proof of concept
 
 DNS (RFC 1035) was chosen as the demonstration protocol because it is
-well-known, fully specified, binary, and small enough to implement
-completely in a short session.  It exercises the key features of
-wire_format: fixed-width big-endian fields, literal constants, and raw
-buffer emission for variable-length data.
+well-known, fully specified, binary, and small enough to follow. Its source is
+[`examples/dns/dns.wf.json5`](examples/dns/dns.wf.json5). The build checks that
+source, compiles it to `.wfb` plus a symbolic header, and embeds the `.wfb` with
+`.incbin`. The C code looks up the generated encode and decode programs instead
+of containing hand-written format strings.
 
 ### DNS query header
 
@@ -349,40 +352,44 @@ A DNS query header is 6 × uint16 fields in big-endian order:
 ID | flags | QDCOUNT | ANCOUNT | NSCOUNT | ARCOUNT
 ```
 
-The wire_format format string for this is:
+The source description for the query header is:
 
-```c
-const char wi_dns_header[] =
-    "%p1%w"      // transaction ID
-    "%p2%w"      // flags
-    "%p3%w"      // QDCOUNT
-    "%{0}%w"     // ANCOUNT = 0
-    "%{0}%w"     // NSCOUNT = 0
-    "%{0}%w";    // ARCOUNT = 0
+```json5
+fields: [
+  { name: 'transaction-id', type: 'u16' },
+  { name: 'flags', type: 'u16' },
+  { name: 'question-count', type: 'u16' },
+  { name: 'answer-count', type: 'u16', constant: 0 },
+  { name: 'authority-count', type: 'u16', constant: 0 },
+  { name: 'additional-count', type: 'u16', constant: 0 },
+]
 ```
 
-Six fields, one line each.  The format string is the documentation of
-the wire layout.
+`wfc` generates the format string, caller-field ordinals, wire size, and testable
+wire image from that description.
 
 ### DNS question section
 
-The question section contains a length-prefixed label sequence (QNAME),
-a query type, and a query class.  The label encoding is handled by a
-small helper (`dns_encode_name`) which splits on dots and prepends
-lengths.  The resulting byte buffer is emitted via `%r`:
+The question section contains a length-prefixed label sequence (QNAME), a query
+type, and a query class. Source-format version 1 describes fixed-size records,
+so the bounded `dns_encode_name()` helper handles QNAME. The fixed tail is a
+second compiled message:
 
-```c
-const char wi_dns_question[] =
-    "%p1%p2%r"   // encoded QNAME (pointer + length via %r)
-    "%p3%w"      // QTYPE
-    "%p4%w";     // QCLASS
+```json5
+fields: [
+  { name: 'query-type', type: 'u16' },
+  { name: 'query-class', type: 'u16' },
+]
 ```
+
+The response header and fixed resource-record fields are compiled from the same
+file. Variable-length names and resource data remain ordinary bounded DNS code.
 
 ### Running the demo
 
 ```
 make
-./dns_demo [hostname]
+./target/examples/dns/dns_demo [hostname]
 ```
 
 Default hostname is `example.com`.  Queries Google's public resolver
@@ -466,42 +473,44 @@ re-initialising.
 
 ### DNS response header example
 
+The DNS example describes the header in JSON5:
+
+```json5
+fields: [
+  { name: 'transaction-id', type: 'u16' },
+  { name: 'flags', type: 'u16' },
+  { name: 'question-count', type: 'u16' },
+  { name: 'answer-count', type: 'u16' },
+  { name: 'authority-count', type: 'u16' },
+  { name: 'additional-count', type: 'u16' },
+]
+```
+
+The generated database supplies the decode program and the generated header
+supplies its field ordinals:
+
 ```c
-const char wi_dns_resp_hdr[] =
-    "%S%Pa"     // txid    -> a
-    "%S%Pb"     // flags   -> b
-    "%S%Pc"     // qdcount -> c
-    "%S%Pd"     // ancount -> d
-    "%S%Pe"     // nscount -> e
-    "%S%Pf";    // arcount -> f
-
 wi_decode_init(&v, response, rlen, NULL, 0);
-wi_parse(&v, wi_dns_resp_hdr);
+wi_parse(&v, response_header_format);
 
-uint16_t txid    = (uint16_t)v.vars[0];  // a
-uint16_t flags   = (uint16_t)v.vars[1];  // b
-uint16_t ancount = (uint16_t)v.vars[3];  // d
+uint16_t txid = (uint16_t)v.vars[DNS_RESPONSE_HEADER_ORDINAL_TRANSACTION_ID];
+uint16_t flags = (uint16_t)v.vars[DNS_RESPONSE_HEADER_ORDINAL_FLAGS];
+uint16_t ancount = (uint16_t)v.vars[DNS_RESPONSE_HEADER_ORDINAL_ANSWER_COUNT];
 ```
 
 After this call `v.in_pos` is 12 (the DNS fixed header length), ready to
 continue into the question or answer sections.  The DNS answer RR fixed
 fields (type, class, TTL, rdlength) are decoded the same way after the
-variable-length name is skipped:
+variable-length name is skipped. Its program is also generated from JSON5:
 
 ```c
-const char wi_dns_rr[] =
-    "%S%Pa"     // type     -> a
-    "%S%Pb"     // class    -> b
-    "%L%Pc"     // ttl      -> c  (uint32)
-    "%S%Pd";    // rdlength -> d
-
 v.in_pos = (size_t)(p - buf);  // sync past skipped name
-wi_parse(&v, wi_dns_rr);
+wi_parse(&v, resource_record_format);
 p = buf + v.in_pos;
 
-uint16_t type     = (uint16_t)v.vars[0];
-uint32_t ttl      = (uint32_t)v.vars[2];
-uint16_t rdlength = (uint16_t)v.vars[3];
+uint16_t type = (uint16_t)v.vars[DNS_RESOURCE_RECORD_ORDINAL_RECORD_TYPE];
+uint32_t ttl = (uint32_t)v.vars[DNS_RESOURCE_RECORD_ORDINAL_TTL];
+uint16_t rdlength = (uint16_t)v.vars[DNS_RESOURCE_RECORD_ORDINAL_DATA_LENGTH];
 ```
 
 ---
@@ -590,12 +599,15 @@ storage.  All of those choices expose the same bytes to the interpreter.
 
 Adding a new message type requires:
 
-1. Define the format string describing the wire layout.
-2. Call `wi_init()` with the output buffer and parameters.
-3. Call `wi_parse()` with the format string.
+1. Add the message and its independently derived vectors to the `.wf.json5`
+   source.
+2. Run `wfc` to check the vectors and produce the `.wfb` database and symbolic
+   header.
+3. Load or embed the database and obtain the generated encode or decode program.
+4. Initialize `wi_vars_t` and pass that program to `wi_parse()`.
 
-No new parser code.  No new encoding function.  The format string is
-both the specification and the implementation of the message layout.
+No new parser code or message-specific codec function is required. Direct
+format strings remain available when a compiled database would be unnecessary.
 
 If the format string language lacks a specifier needed by the protocol,
 add one operator to the dispatch table in `wire_format.c`.  All existing
@@ -650,7 +662,7 @@ protocol-builder idea can be evaluated independently.
 
 ```sh
 cargo test
-cargo run --example telemetry_demo
+cargo run -p wire_format --example telemetry_demo
 ```
 
 The Rust API keeps message definitions as strings and uses caller-supplied
@@ -686,9 +698,6 @@ are available with `WireFormat::faults()` after a parse.
 |-----------------|---------|
 | `wire_format.h` | public API and types |
 | `wire_format.c` | C format string parser |
-| `dns.h`         | DNS constants and format string declarations |
-| `dns.c`         | DNS query construction and response parsing |
-| `dns_demo.c`    | C command-line DNS demo |
 | `compiler/` | C JSON5 parser, source checker, and `.wfb` compiler |
 | `Cargo.toml` | Cargo workspace manifest |
 | `rust/Cargo.toml` | Rust crate manifest |
@@ -705,8 +714,9 @@ are available with `WireFormat::faults()` after a parse.
 | `doc/WF_FILE_FORMAT.md` | normative `.wf.json5` source-format definition |
 | `doc/WFB_FILE_FORMAT.md` | normative compiled binary format |
 | `schema/wire-format-v1.schema.json` | JSON Schema for source-format version 1 |
-| `examples/example-telemetry.wf.json5` | checked and compiled JSON5 example |
-| `rust/examples/telemetry_demo.rs` | Rust protocol-frame demo |
+| `examples/dns/` | C DNS demo, JSON5 protocol source, and embedded database wrapper |
+| `examples/source-format/` | Small source-compiler example |
+| `examples/telemetry/` | Standalone Rust telemetry-frame example |
 
 ---
 

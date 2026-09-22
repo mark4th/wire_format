@@ -96,7 +96,7 @@ fn assert_wfb_header(binary: &[u8]) {
 
 #[test]
 fn checks_the_example_source_from_the_command_line() {
-    let source = manifest_path("examples/example-telemetry.wf.json5");
+    let source = manifest_path("examples/source-format/example-telemetry.wf.json5");
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
         .arg("check")
         .arg(source)
@@ -133,8 +133,10 @@ fn language_backends_are_not_part_of_the_interface() {
 
 #[test]
 fn compiles_loadable_and_incbin_compatible_wfb() {
-    let (directory, _stem, header, binary) =
-        compile_wfb("examples/example-telemetry.wf.json5", "example_telemetry");
+    let (directory, _stem, header, binary) = compile_wfb(
+        "examples/source-format/example-telemetry.wf.json5",
+        "example_telemetry",
+    );
     assert_wfb_header(&binary);
     assert_eq!(u32_at(&binary, 16), 1);
 

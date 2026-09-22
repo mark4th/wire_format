@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn writes_portable_sections_and_string_offsets() {
-        let source = include_str!("../../../examples/example-telemetry.wf.json5");
+        let source = include_str!("../../../examples/source-format/example-telemetry.wf.json5");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let compiled = protocol
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn header_names_messages_fields_and_string_sections() {
-        let source = include_str!("../../../examples/example-telemetry.wf.json5");
+        let source = include_str!("../../../examples/source-format/example-telemetry.wf.json5");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let generated = generate(&protocol).unwrap();

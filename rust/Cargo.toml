@@ -7,3 +7,7 @@ description = "Rust format-string driven binary protocol encoder/decoder"
 
 [features]
 default = []
+
+[[example]]
+name = "telemetry_demo"
+path = "../examples/telemetry/main.rs"

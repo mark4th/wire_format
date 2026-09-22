@@ -33,6 +33,12 @@ int main(int argc, char *argv[])
 
     size_t qlen = dns_build_query(hostname, DNS_QTYPE_A, txid, query, BUF_SIZE);
 
+    if (qlen == 0)
+    {
+        fprintf(stderr, "could not construct DNS query\n");
+        return 1;
+    }
+
     printf("querying %s for A records (txid=0x%04x, %zu bytes)\n",
            hostname, txid, qlen);
 

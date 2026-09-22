@@ -5,7 +5,7 @@
     name: 'example-telemetry',
     description: 'A small example used to exercise the source compiler',
     standard: 'Example 1',
-    reference: 'doc/WF_FILE_FORMAT.md',
+    reference: '../../doc/WF_FILE_FORMAT.md',
 
     byte_order: 'big-endian',
     bit_order: 'msb-first',
