@@ -50,6 +50,7 @@ pub enum FieldType {
     U16,
     U32,
     U64,
+    Bytes,
 }
 
 impl FieldType {
@@ -60,11 +61,12 @@ impl FieldType {
             Self::U16 => 16,
             Self::U32 => 32,
             Self::U64 => 64,
+            Self::Bytes => 0,
         }
     }
 
     pub fn is_scalar(self) -> bool {
-        !matches!(self, Self::Bits(_))
+        matches!(self, Self::U8 | Self::U16 | Self::U32 | Self::U64)
     }
 }
 
@@ -86,7 +88,13 @@ pub struct Field {
 pub struct Assignment {
     pub name: String,
     pub location: Location,
-    pub value: u64,
+    pub value: AssignmentValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentValue {
+    Unsigned(u64),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -114,6 +122,7 @@ pub struct Message {
 
 #[derive(Debug)]
 pub struct Protocol {
+    pub version: u16,
     pub name: String,
     pub location: Location,
     pub description: String,
@@ -175,8 +184,15 @@ struct SourceVector {
     wire: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SourceAssignmentValue {
+    Unsigned(u64),
+    Bytes(Vec<u8>),
+}
+
 #[derive(Debug)]
-struct Assignments(Vec<(String, u64)>);
+struct Assignments(Vec<(String, SourceAssignmentValue)>);
 
 impl<'de> Deserialize<'de> for Assignments {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -198,7 +214,7 @@ impl<'de> Deserialize<'de> for Assignments {
             {
                 let mut values = Vec::new();
                 let mut names = HashSet::new();
-                while let Some((name, value)) = map.next_entry::<String, u64>()? {
+                while let Some((name, value)) = map.next_entry::<String, SourceAssignmentValue>()? {
                     if !names.insert(name.clone()) {
                         return Err(de::Error::custom(format!(
                             "duplicate vector value `{name}`"
@@ -227,20 +243,20 @@ pub fn parse(text: &str) -> Result<Protocol> {
 
     let source: SourceFile =
         json_five::from_str(text).map_err(|error| Diagnostic::new(DOCUMENT, error.to_string()))?;
-    if source.wire_format != 1 {
+    if source.wire_format != 1 && source.wire_format != 2 {
         return Err(Diagnostic::new(
             DOCUMENT,
             format!(
-                "unsupported wire_format version {}; expected 1",
+                "unsupported wire_format version {}; expected 1 or 2",
                 source.wire_format
             ),
         ));
     }
-    source.protocol.compile()
+    source.protocol.compile(source.wire_format as u16)
 }
 
 impl SourceProtocol {
-    fn compile(self) -> Result<Protocol> {
+    fn compile(self, version: u16) -> Result<Protocol> {
         validate_identifier(&self.name)?;
         if self.messages.is_empty() {
             return Err(Diagnostic::new(
@@ -252,7 +268,7 @@ impl SourceProtocol {
         let mut names = HashSet::new();
         let mut messages = Vec::with_capacity(self.messages.len());
         for message in self.messages {
-            let message = message.compile()?;
+            let message = message.compile(version)?;
             if !names.insert(message.name.clone()) {
                 return Err(Diagnostic::new(
                     DOCUMENT,
@@ -263,6 +279,7 @@ impl SourceProtocol {
         }
 
         Ok(Protocol {
+            version,
             name: self.name,
             location: DOCUMENT,
             description: self.description,
@@ -276,7 +293,7 @@ impl SourceProtocol {
 }
 
 impl SourceMessage {
-    fn compile(self) -> Result<Message> {
+    fn compile(self, version: u16) -> Result<Message> {
         validate_identifier(&self.name)?;
         if self.fields.is_empty() {
             return Err(Diagnostic::new(
@@ -287,8 +304,18 @@ impl SourceMessage {
 
         let mut field_names = HashSet::new();
         let mut fields = Vec::with_capacity(self.fields.len());
-        for field in self.fields {
-            let field = field.compile()?;
+        let field_count = self.fields.len();
+        for (field_index, field) in self.fields.into_iter().enumerate() {
+            let field = field.compile(version)?;
+            if matches!(field.field_type, FieldType::Bytes) && field_index + 1 != field_count {
+                return Err(Diagnostic::new(
+                    DOCUMENT,
+                    format!(
+                        "byte field `{}` must be the final field in its message",
+                        field.name
+                    ),
+                ));
+            }
             if !field_names.insert(field.name.clone()) {
                 return Err(Diagnostic::new(
                     DOCUMENT,
@@ -322,7 +349,7 @@ impl SourceMessage {
 }
 
 impl SourceField {
-    fn compile(self) -> Result<Field> {
+    fn compile(self, version: u16) -> Result<Field> {
         validate_identifier(&self.name)?;
         let field_type = match self.field_type.as_str() {
             "bits" => {
@@ -355,16 +382,38 @@ impl SourceField {
                     _ => unreachable!(),
                 }
             }
+            "bytes" => {
+                if self.width.is_some() {
+                    return Err(Diagnostic::new(
+                        DOCUMENT,
+                        format!("byte field `{}` may not specify `width`", self.name),
+                    ));
+                }
+                if self.constant.is_some() {
+                    return Err(Diagnostic::new(
+                        DOCUMENT,
+                        format!("byte field `{}` may not specify `constant`", self.name),
+                    ));
+                }
+                FieldType::Bytes
+            }
             _ => {
                 return Err(Diagnostic::new(
                     DOCUMENT,
                     format!(
-                        "field `{}` type must be `bits`, `u8`, `u16`, `u32`, or `u64`",
+                        "field `{}` type must be `bits`, `u8`, `u16`, `u32`, `u64`, or `bytes`",
                         self.name
                     ),
                 ));
             }
         };
+
+        if matches!(field_type, FieldType::Bytes) && version < 2 {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!("byte field `{}` requires wire_format version 2", self.name),
+            ));
+        }
 
         let kind = match self.constant {
             Some(value) => {
@@ -403,7 +452,10 @@ impl SourceVector {
                 Ok(Assignment {
                     name,
                     location: DOCUMENT,
-                    value,
+                    value: match value {
+                        SourceAssignmentValue::Unsigned(value) => AssignmentValue::Unsigned(value),
+                        SourceAssignmentValue::Bytes(value) => AssignmentValue::Bytes(value),
+                    },
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -444,6 +496,12 @@ fn validate_identifier(identifier: &str) -> Result<()> {
 }
 
 pub fn ensure_value_fits(value: u64, field_type: FieldType, location: Location) -> Result<()> {
+    if matches!(field_type, FieldType::Bytes) {
+        return Err(Diagnostic::new(
+            location,
+            "a byte field requires an octet array",
+        ));
+    }
     let width = field_type.width();
     if width < 64 && value >= (1_u64 << width) {
         return Err(Diagnostic::new(

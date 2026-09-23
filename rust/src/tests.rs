@@ -53,6 +53,26 @@ fn emits_raw_parameter() {
 }
 
 #[test]
+fn captures_remaining_input_as_slice() {
+    let input = [0x12, 0x34, 0xaa, 0xbb, 0xcc];
+    let mut wf = WireFormat::new_decode(&input, &[]);
+    wf.parse("%S%Pa%{0}%R").unwrap();
+    assert_eq!(wf.int_var(b'a'), Some(0x1234));
+    assert_eq!(wf.slice(0), Some(&input[2..]));
+    assert_eq!(wf.input_pos(), input.len());
+}
+
+#[test]
+fn emits_version_two_slice_slot() {
+    let bytes = [0xde, 0xad, 0xbe, 0xef];
+    let mut output = [0u8; 8];
+    let mut wf = WireFormat::new_encode(&mut output, &[]);
+    wf.set_slice(2, &bytes).unwrap();
+    wf.parse("%{2}%v").unwrap();
+    assert_eq!(wf.output(), &bytes);
+}
+
+#[test]
 fn emits_typed_arrays_in_big_endian_order() {
     let bytes = [0x11, 0x22, 0x33];
     let shorts = [0x1122, 0x3344, 0x5566];

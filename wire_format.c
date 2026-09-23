@@ -409,6 +409,45 @@ static void _r(wi_vars_t *wi)
     }
 }
 
+// %R - decode the unconsumed input as a zero-copy byte slice.
+//
+// The stack supplies the zero-based destination slot.  Version-2 compiled
+// formats use this for a final variable-length bytes field.  Capturing rather
+// than copying keeps large packet and file-data fields allocation-free.
+
+static void _R(wi_vars_t *wi)
+{
+    int64_t slot = fs_pop(wi);
+
+    if (wi->out != NULL || wi->in == NULL || slot < 0 || slot >= WI_MAX_PARAMS ||
+        wi->in_pos > wi->in_size)
+    {
+        wi->overrun = 1;
+        return;
+    }
+
+    wi->slices[slot].data = wi->in + wi->in_pos;
+    wi->slices[slot].length = wi->in_size - wi->in_pos;
+    wi->in_pos = wi->in_size;
+}
+
+// %v - emit the byte slice in the zero-based slot popped from the stack.
+
+static void _v(wi_vars_t *wi)
+{
+    int64_t slot = fs_pop(wi);
+    size_t index;
+
+    if (wi->out == NULL || slot < 0 || slot >= WI_MAX_PARAMS ||
+        (wi->slices[slot].data == NULL && wi->slices[slot].length != 0))
+    {
+        wi->overrun = 1;
+        return;
+    }
+    for (index = 0; index < wi->slices[slot].length; index++)
+        b_emit(wi, wi->slices[slot].data[index]);
+}
+
 // -----------------------------------------------------------------------
 // dispatch table
 
@@ -530,6 +569,8 @@ static const wi_op_t ops[] =
 {
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
     { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
+    { 'R', _R       },
+    { 'v', _v       },
     { 'B', _rB      }, { 'S', _rS     }, { 'L', _rL     },
     { 'q', _bq      }, { 'Q', _rQ     },
     { 'x', _bx      }, { 'X', _bX     }, { 'f', _f      },
@@ -603,6 +644,16 @@ void wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
             nparams = WI_MAX_PARAMS;
         memcpy(v->params, params, (size_t)nparams * sizeof(int64_t));
     }
+}
+
+int wi_set_slice(wi_vars_t *v, int slot, const uint8_t *data, size_t length)
+{
+    if (v == NULL || slot < 0 || slot >= WI_MAX_PARAMS ||
+        (data == NULL && length != 0))
+        return -1;
+    v->slices[slot].data = data;
+    v->slices[slot].length = length;
+    return 0;
 }
 
 // -----------------------------------------------------------------------

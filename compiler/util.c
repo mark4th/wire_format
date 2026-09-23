@@ -59,6 +59,8 @@ uint8_t wfc_field_width(const wfc_field_t *field)
         return 32;
     case WFC_U64:
         return 64;
+    case WFC_BYTES:
+        return 0;
     }
     return 0;
 }

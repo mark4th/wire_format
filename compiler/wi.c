@@ -7,16 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WFB_FORMAT_VERSION 1U
-#define WFB_HEADER_SIZE 64U
-#define WFB_MESSAGE_RECORD_SIZE 32U
-#define WFB_NO_STRING UINT32_MAX
-#define WFB_MAX_CALLER_FIELDS 16U
-#define WFB_FIXED_FIELD_FAULT UINT64_C(1)
-#define WFB_PROTOCOL_STRING_COUNT 4U
-#define WFB_MESSAGE_FIXED_STRING_COUNT 4U
-#define WFB_FLAG_WIRE_BYTE_ORDER_LITTLE (1U << 0)
-#define WFB_FLAG_WIRE_BIT_ORDER_LSB (1U << 1)
+#define WI_HEADER_SIZE 64U
+#define WI_MESSAGE_RECORD_SIZE 32U
+#define WI_NO_STRING UINT32_MAX
+#define WI_MAX_CALLER_FIELDS 16U
+#define WI_FIXED_FIELD_FAULT UINT64_C(1)
+#define WI_PROTOCOL_STRING_COUNT 4U
+#define WI_MESSAGE_FIXED_STRING_COUNT 4U
+#define WI_FLAG_WIRE_BYTE_ORDER_LITTLE (1U << 0)
+#define WI_FLAG_WIRE_BIT_ORDER_LSB (1U << 1)
 
 typedef struct {
     uint8_t *data;
@@ -161,7 +160,7 @@ static int append_constant_check(string_t *output, uint64_t expected)
 {
     return push_literal(output, expected) &&
            string_append(output, "%=%!%?%t") &&
-           push_literal(output, WFB_FIXED_FIELD_FAULT) &&
+           push_literal(output, WI_FIXED_FIELD_FAULT) &&
            string_append(output, "%E%;");
 }
 
@@ -180,7 +179,8 @@ static int compile_scalar(const wfc_field_t *field, size_t supplied_index,
         case WFC_U16: encode_op = "%w"; decode_op = "%S"; break;
         case WFC_U32: encode_op = "%W"; decode_op = "%L"; break;
         case WFC_U64: encode_op = "%q"; decode_op = "%Q"; break;
-        case WFC_BITS: return 0;
+        case WFC_BITS:
+        case WFC_BYTES: return 0;
         }
         return string_printf(encode, "%%p{%zu}%s", supplied_index + 1, encode_op) &&
                string_printf(decode, "%s%%P%c", decode_op,
@@ -279,6 +279,7 @@ static uint8_t scalar_swap(const wfc_field_t *field, wfc_byte_order_t order)
     case WFC_U32: return 4;
     case WFC_U64: return 8;
     case WFC_BITS:
+    case WFC_BYTES:
     case WFC_U8: return 0;
     }
     return 0;
@@ -311,10 +312,10 @@ static int compile_message(const wfc_protocol_t *protocol,
         int supplied = !field->is_constant;
         compiled->offsets[field_index] = bit_offset;
         if (supplied) {
-            if (compiled->value_count == WFB_MAX_CALLER_FIELDS) {
+            if (compiled->value_count == WI_MAX_CALLER_FIELDS) {
                 wfc_set_error(error, message->location,
                               "the compiled format supports at most %u caller fields per message; `%s` has more",
-                              WFB_MAX_CALLER_FIELDS, message->name);
+                              WI_MAX_CALLER_FIELDS, message->name);
                 goto fail;
             }
             if (field->type == WFC_BITS && field->width == 64) {
@@ -331,6 +332,12 @@ static int compile_message(const wfc_protocol_t *protocol,
         if (field->type == WFC_BITS) {
             if (!compile_bits(field, bit_offset, supplied_index, supplied,
                               protocol->bit_order, &encode, &decode)) {
+                wfc_set_error(error, field->location, "out of memory");
+                goto fail;
+            }
+        } else if (field->type == WFC_BYTES) {
+            if (!string_printf(&encode, "%%{%zu}%%v", supplied_index) ||
+                !string_printf(&decode, "%%{%zu}%%R", supplied_index)) {
                 wfc_set_error(error, field->location, "out of memory");
                 goto fail;
             }
@@ -390,7 +397,7 @@ static int add_string(bytes_t *table, const char *text, uint32_t *offset,
 {
     size_t length = strlen(text);
     if (table->length > UINT32_MAX) {
-        wfc_set_error(error, location, "string table offset exceeds the WFB 32-bit limit");
+        wfc_set_error(error, location, "string table offset exceeds the WI 32-bit limit");
         return 0;
     }
     *offset = (uint32_t)table->length;
@@ -405,7 +412,7 @@ static int checked_u32(size_t value, const char *what, wfc_location_t location,
                        uint32_t *result, wfc_error_t *error)
 {
     if (value > UINT32_MAX) {
-        wfc_set_error(error, location, "%s exceeds the WFB 32-bit limit", what);
+        wfc_set_error(error, location, "%s exceeds the WI 32-bit limit", what);
         return 0;
     }
     *result = (uint32_t)value;
@@ -462,7 +469,7 @@ static int build_image(const wfc_protocol_t *protocol,
 
 #define ADD_PROTOCOL_STRING(text, absent) do { \
     uint32_t value; \
-    if ((text) == NULL && (absent)) value = WFB_NO_STRING; \
+    if ((text) == NULL && (absent)) value = WI_NO_STRING; \
     else if (!add_string(&strings, (text), &value, protocol->location, error)) goto done; \
     if (!push_u32(&string_offsets, &string_count, &string_capacity, value)) { \
         wfc_set_error(error, protocol->location, "out of memory"); goto done; \
@@ -518,12 +525,12 @@ static int build_image(const wfc_protocol_t *protocol,
         }
     }
 
-    if (protocol->message_count > (SIZE_MAX - WFB_HEADER_SIZE) / WFB_MESSAGE_RECORD_SIZE) {
+    if (protocol->message_count > (SIZE_MAX - WI_HEADER_SIZE) / WI_MESSAGE_RECORD_SIZE) {
         wfc_set_error(error, protocol->location, "message table size exceeds the host size limit");
         goto done;
     }
-    message_table_size = protocol->message_count * WFB_MESSAGE_RECORD_SIZE;
-    value_table_offset = WFB_HEADER_SIZE + message_table_size;
+    message_table_size = protocol->message_count * WI_MESSAGE_RECORD_SIZE;
+    value_table_offset = WI_HEADER_SIZE + message_table_size;
     if (values.length > SIZE_MAX - value_table_offset) {
         wfc_set_error(error, protocol->location, "string-offset section offset exceeds the host size limit");
         goto done;
@@ -562,24 +569,24 @@ static int build_image(const wfc_protocol_t *protocol,
         goto done;
 
     image->flags = (protocol->byte_order == WFC_LITTLE_ENDIAN
-                        ? WFB_FLAG_WIRE_BYTE_ORDER_LITTLE : 0) |
+                        ? WI_FLAG_WIRE_BYTE_ORDER_LITTLE : 0) |
                    (protocol->bit_order == WFC_LSB_FIRST
-                        ? WFB_FLAG_WIRE_BIT_ORDER_LSB : 0);
-    image->message_table_offset = WFB_HEADER_SIZE;
+                        ? WI_FLAG_WIRE_BIT_ORDER_LSB : 0);
+    image->message_table_offset = WI_HEADER_SIZE;
     image->protocol_strings_offset = image->string_offsets_offset;
 
-    if (!bytes_append(&output, "WFB\0", 4) ||
-        !put_u16(&output, WFB_FORMAT_VERSION) ||
-        !put_u16(&output, WFB_HEADER_SIZE) ||
+    if (!bytes_append(&output, "WI\0\0", 4) ||
+        !put_u16(&output, protocol->version) ||
+        !put_u16(&output, WI_HEADER_SIZE) ||
         !put_u32(&output, temporary) ||
         !put_u32(&output, image->flags) ||
         !put_u32(&output, (uint32_t)protocol->message_count) ||
-        !put_u32(&output, WFB_MESSAGE_RECORD_SIZE) ||
-        !put_u32(&output, WFB_HEADER_SIZE) ||
+        !put_u32(&output, WI_MESSAGE_RECORD_SIZE) ||
+        !put_u32(&output, WI_HEADER_SIZE) ||
         !put_u32(&output, image->value_table_offset) ||
         !put_u32(&output, image->value_table_size) ||
         !put_u32(&output, image->protocol_strings_offset) ||
-        !put_u32(&output, WFB_PROTOCOL_STRING_COUNT) ||
+        !put_u32(&output, WI_PROTOCOL_STRING_COUNT) ||
         !put_u32(&output, image->string_offsets_offset) ||
         !put_u32(&output, image->string_offset_count) ||
         !put_u32(&output, image->string_table_offset) ||
@@ -595,7 +602,7 @@ static int build_image(const wfc_protocol_t *protocol,
         size_t string_offset = string_offsets_offset + message_string_indices[message_index] * 4;
         if (!checked_u32(string_offset, "message string section offset",
                          item->message->location, &record->string_section_offset, error) ||
-            !checked_u32(WFB_MESSAGE_FIXED_STRING_COUNT + item->message->field_count,
+            !checked_u32(WI_MESSAGE_FIXED_STRING_COUNT + item->message->field_count,
                          "message string count", item->message->location,
                          &record->string_count, error))
             goto done;
@@ -614,7 +621,9 @@ static int build_image(const wfc_protocol_t *protocol,
             !put_u32(&output, (uint32_t)item->value_count) ||
             !put_u32(&output, record->widths_offset) ||
             !put_u32(&output, record->swaps_offset) ||
-            !put_u32(&output, 0) || !put_u32(&output, 0)) {
+            !put_u32(&output,
+                     item->message->fields[item->message->field_count - 1].type == WFC_BYTES) ||
+            !put_u32(&output, 0)) {
             wfc_set_error(error, item->message->location, "out of memory");
             goto done;
         }
@@ -740,21 +749,21 @@ static int generate_header(const wfc_protocol_t *protocol,
 
 #define DEFINE(suffix, value) \
     do { if (!header_named_define(&header, prefix, suffix, value)) goto done; } while (0)
-    DEFINE("_WFB_FORMAT_VERSION", WFB_FORMAT_VERSION);
-    DEFINE("_WFB_FILE_SIZE", (uint32_t)image->size);
-    DEFINE("_WFB_FLAGS", image->flags);
-    DEFINE("_WFB_MESSAGE_COUNT", (uint32_t)protocol->message_count);
-    DEFINE("_WFB_MESSAGE_TABLE_OFFSET", image->message_table_offset);
-    DEFINE("_WFB_MESSAGE_RECORD_SIZE", WFB_MESSAGE_RECORD_SIZE);
-    DEFINE("_WFB_VALUE_TABLE_OFFSET", image->value_table_offset);
-    DEFINE("_WFB_VALUE_TABLE_SIZE", image->value_table_size);
-    DEFINE("_WFB_PROTOCOL_STRINGS_OFFSET", image->protocol_strings_offset);
-    DEFINE("_WFB_STRING_OFFSETS_OFFSET", image->string_offsets_offset);
-    DEFINE("_WFB_STRING_OFFSET_COUNT", image->string_offset_count);
-    DEFINE("_WFB_STRING_TABLE_OFFSET", image->string_table_offset);
-    DEFINE("_WFB_STRING_TABLE_SIZE", image->string_table_size);
-    DEFINE("_WFB_NO_STRING", WFB_NO_STRING);
-    DEFINE("_WFB_FAULT_FIXED_FIELD", (uint32_t)WFB_FIXED_FIELD_FAULT);
+    DEFINE("_WI_FORMAT_VERSION", protocol->version);
+    DEFINE("_WI_FILE_SIZE", (uint32_t)image->size);
+    DEFINE("_WI_FLAGS", image->flags);
+    DEFINE("_WI_MESSAGE_COUNT", (uint32_t)protocol->message_count);
+    DEFINE("_WI_MESSAGE_TABLE_OFFSET", image->message_table_offset);
+    DEFINE("_WI_MESSAGE_RECORD_SIZE", WI_MESSAGE_RECORD_SIZE);
+    DEFINE("_WI_VALUE_TABLE_OFFSET", image->value_table_offset);
+    DEFINE("_WI_VALUE_TABLE_SIZE", image->value_table_size);
+    DEFINE("_WI_PROTOCOL_STRINGS_OFFSET", image->protocol_strings_offset);
+    DEFINE("_WI_STRING_OFFSETS_OFFSET", image->string_offsets_offset);
+    DEFINE("_WI_STRING_OFFSET_COUNT", image->string_offset_count);
+    DEFINE("_WI_STRING_TABLE_OFFSET", image->string_table_offset);
+    DEFINE("_WI_STRING_TABLE_SIZE", image->string_table_size);
+    DEFINE("_WI_NO_STRING", WI_NO_STRING);
+    DEFINE("_WI_FAULT_FIXED_FIELD", (uint32_t)WI_FIXED_FIELD_FAULT);
     if (!string_append(&header, "\n"))
         goto done;
     DEFINE("_PROTOCOL_STRING_NAME", 0);
@@ -788,7 +797,7 @@ static int generate_header(const wfc_protocol_t *protocol,
 } while (0)
         MESSAGE_DEFINE("%s_MESSAGE_%s", (uint32_t)message_index);
         MESSAGE_DEFINE("%s_%s_RECORD_OFFSET",
-                       image->message_table_offset + (uint32_t)message_index * WFB_MESSAGE_RECORD_SIZE);
+                       image->message_table_offset + (uint32_t)message_index * WI_MESSAGE_RECORD_SIZE);
         MESSAGE_DEFINE("%s_%s_STRINGS_OFFSET", record->string_section_offset);
         MESSAGE_DEFINE("%s_%s_STRING_COUNT", record->string_count);
         MESSAGE_DEFINE("%s_%s_STRING_NAME", 0);
@@ -804,7 +813,7 @@ static int generate_header(const wfc_protocol_t *protocol,
             if (name.data != NULL) name.data[0] = 0;
             if (!string_printf(&name, "%s_STRING_FIELD_%s", base.data, field) ||
                 !header_define(&header, name.data,
-                               WFB_MESSAGE_FIXED_STRING_COUNT + (uint32_t)field_index)) {
+                               WI_MESSAGE_FIXED_STRING_COUNT + (uint32_t)field_index)) {
                 free(field); free(message); free(base.data); free(name.data); goto done;
             }
             free(field);
@@ -832,7 +841,13 @@ static int generate_header(const wfc_protocol_t *protocol,
         }
         name.length = 0; if (name.data != NULL) name.data[0] = 0;
         if (!string_printf(&name, "%s_WIRE_SIZE", base.data) ||
-            !header_define(&header, name.data, (uint32_t)item->octets) ||
+            !header_define(&header, name.data, (uint32_t)item->octets)) {
+            free(message); free(base.data); free(name.data); goto done;
+        }
+        name.length = 0; if (name.data != NULL) name.data[0] = 0;
+        if (!string_printf(&name, "%s_VARIABLE_WIRE_SIZE", base.data) ||
+            !header_define(&header, name.data,
+                           item->message->fields[item->message->field_count - 1].type == WFC_BYTES) ||
             !string_append(&header, "\n")) {
             free(message); free(base.data); free(name.data); goto done;
         }

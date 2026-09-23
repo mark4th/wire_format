@@ -1,14 +1,14 @@
-# The compiled `.wfb` format
+# The compiled `.wi` format
 
 ## Purpose
 
-`wfc` compiles one human-readable `.wf.json5` protocol description into two files:
+`wfc` compiles one human-readable `.wf` protocol description into two files:
 
 ```text
-protocol.wf.json5 -> protocol.wfb + protocol.h
+protocol.wf -> protocol.wi + protocol.h
 ```
 
-The `.wfb` contains the protocol data.  The `.h` gives symbolic names to the
+The `.wi` contains the protocol data.  The `.h` gives symbolic names to the
 numeric indexes and offsets in that data.  Neither file decides how an
 application stores or obtains the binary.  Reading it from a file, placing it
 in flash with `.incbin`, copying it from another device, and converting it to a
@@ -16,7 +16,7 @@ language array are all application choices.
 
 The format contains no pointers, native structures, or implicit padding.  All
 multi-octet integers are unsigned and little-endian.  Unless stated otherwise,
-an offset is an absolute octet offset from the beginning of the `.wfb`.
+an offset is an absolute octet offset from the beginning of the `.wi`.
 
 ## File organization
 
@@ -38,7 +38,7 @@ The version 1 header is 64 octets:
 
 | Offset | Size | Meaning |
 |-------:|-----:|---------|
-| 0 | 4 | magic: `57 46 42 00`, or `WFB\0` |
+| 0 | 4 | magic: `57 49 00 00`, or `WI\0\0` |
 | 4 | 2 | compiled-format version: `1` |
 | 6 | 2 | header size: `64` |
 | 8 | 4 | total file size |
@@ -58,7 +58,7 @@ The version 1 header is 64 octets:
 
 Protocol flag bit 0 is set when the described wire protocol uses little-endian
 scalars.  Bit 1 is set when it numbers bit fields least-significant bit first.
-These flags describe the protocol, not the `.wfb`; the `.wfb` integers are
+These flags describe the protocol, not the `.wi`; the `.wi` integers are
 always little-endian.  All other version 1 flag bits are zero.
 
 The protocol string section contains four 32-bit entries:
@@ -126,7 +126,7 @@ For example, obtaining a message's encode program is conceptually:
 ```text
 entry = message-string-section + (encode-slot * 4)
 relative = little-endian-u32(entry)
-string = wfb-base + string-table-offset + relative
+string = wi-base + string-table-offset + relative
 ```
 
 This is the same two-stage arrangement used by compiled `terminfo`: a named
@@ -142,7 +142,7 @@ must not depend on two equal strings sharing an offset.
 
 The generated header contains only integer constants and comments.  It does
 not include `wire_format.h`, define a native representation of the file, or
-declare storage for the `.wfb`.
+declare storage for the `.wi`.
 
 For each protocol it names:
 
@@ -173,7 +173,7 @@ The names are conveniences, not a required loading API.
 
 ## Validation and versioning
 
-Before using an untrusted or externally stored `.wfb`, an application should
+Before using an untrusted or externally stored `.wi`, an application should
 at minimum validate the magic, version, header and file sizes, section ranges,
 record size, string offsets, and NUL termination.  An application embedding a
 compiler-produced file in immutable firmware may instead establish those
@@ -183,3 +183,14 @@ Version 1 contains no checksum or signature.  A container, firmware image, or
 transport may provide integrity and authenticity without duplicating that
 policy inside the protocol description.  A future incompatible layout uses a
 new compiled-format version; readers must reject versions they do not support.
+
+## Version 2 additions
+
+Version 2 retains the 64-octet header and 32-octet message-record layout.
+Header offset 4 contains compiled-format version 2. Message-record offset 24
+uses bit 0 to indicate that the message ends in a variable `bytes` field.
+The wire-size entry at offset 8 is then the fixed-prefix/minimum size.
+
+The byte field has a zero width-table entry and uses its ordinary caller-field
+ordinal as a slice slot. Its encode program contains `%v`; its decode program
+contains `%R`. All other reserved bits and fields remain zero.

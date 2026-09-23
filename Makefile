@@ -5,13 +5,13 @@ CFLAGS  = -Wall -Wextra -std=c11 -g -O2
 
 TESTS   = call_test quad_test
 WFC_SRCS = compiler/main.c compiler/json5.c compiler/source.c \
-	compiler/check.c compiler/wfb.c compiler/util.c
+	compiler/check.c compiler/wi.c compiler/util.c
 WFC_HEADERS = compiler/json5.h compiler/wfc.h
 
 DNS_DIR = examples/dns
 DNS_BUILD = target/examples/dns
 DNS_HEADER = $(DNS_BUILD)/dns_protocol.h
-DNS_DATABASE = $(DNS_BUILD)/dns_protocol.wfb
+DNS_DATABASE = $(DNS_BUILD)/dns_protocol.wi
 DNS_OBJECTS = $(DNS_BUILD)/dns.o $(DNS_BUILD)/dns_demo.o \
 	$(DNS_BUILD)/dns_protocol.o $(DNS_BUILD)/wire_format.o
 DNS_TARGET = $(DNS_BUILD)/dns_demo
@@ -24,9 +24,9 @@ dns_demo: $(DNS_TARGET)
 $(DNS_TARGET): $(DNS_OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(DNS_HEADER) $(DNS_DATABASE) &: wfc $(DNS_DIR)/dns.wf.json5
+$(DNS_HEADER) $(DNS_DATABASE) &: wfc $(DNS_DIR)/dns.wf
 	mkdir -p $(DNS_BUILD)
-	./wfc $(DNS_DIR)/dns.wf.json5 --output $(DNS_BUILD)/dns_protocol
+	./wfc $(DNS_DIR)/dns.wf --output $(DNS_BUILD)/dns_protocol
 
 $(DNS_BUILD)/dns.o: $(DNS_DIR)/dns.c $(DNS_DIR)/dns.h $(DNS_HEADER)
 	mkdir -p $(DNS_BUILD)

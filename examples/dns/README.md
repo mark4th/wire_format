@@ -1,7 +1,7 @@
 # DNS example
 
 This example builds DNS queries and decodes DNS responses with format programs
-compiled from `dns.wf.json5`.
+compiled from `dns.wf`.
 
 From the repository root:
 
@@ -13,8 +13,8 @@ make dns_demo
 The build performs these operations:
 
 1. Builds the C `wfc` compiler.
-2. Checks and compiles `dns.wf.json5`.
-3. Writes `dns_protocol.wfb` and `dns_protocol.h` under `target/examples/dns/`.
+2. Checks and compiles `dns.wf`.
+3. Writes `dns_protocol.wi` and `dns_protocol.h` under `target/examples/dns/`.
 4. Embeds the database with `dns_protocol.S`.
 5. Builds the demo against the generated header and embedded database.
 

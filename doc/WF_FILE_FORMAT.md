@@ -1,10 +1,10 @@
-# The `.wf.json5` source format
+# The `.wf` source format
 
 ## Purpose
 
-A `.wf.json5` file is the human-readable description of one wire protocol.
+A `.wf` file is the human-readable description of one wire protocol.
 `wfc` checks that description and compiles it into a position-independent
-`.wfb` database plus a C header naming the database contents.
+`.wi` database plus a C header naming the database contents.
 
 JSON5 is used because protocol descriptions are source code, not data exchanged
 on the wire. It permits comments, trailing commas, hexadecimal integers,
@@ -17,7 +17,7 @@ The schema documents the source structure. `wfc` also performs layout and test
 vector checks which JSON Schema cannot express.
 
 The application decides how the compiled database is made available. It may
-load the `.wfb`, embed it in an executable, or place it in firmware storage.
+load the `.wi`, embed it in an executable, or place it in firmware storage.
 Neither the source format nor the compiler imposes a run-time loader.
 
 A source file describes records on the wire. It does not describe what an
@@ -26,6 +26,8 @@ transaction, or which state follows another state. Those are properties of
 the application and its protocol engine.
 
 Version 1 describes fixed-size records.
+The compatible variable-byte-tail extension is documented separately in
+[WF_FILE_FORMAT_V2.md](WF_FILE_FORMAT_V2.md).
 
 ## Complete example
 
@@ -226,7 +228,7 @@ For every vector, `wfc`:
 2. Decodes `wire`, compares every returned field with `values`, and verifies
    every constant.
 
-Vectors are compile-time source tests. They are not stored in the `.wfb`. The
+Vectors are compile-time source tests. They are not stored in the `.wi`. The
 format permits a private definition to omit vectors, but committed protocol
 definitions should have at least one independently derived vector per message.
 
@@ -235,14 +237,14 @@ definitions should have at least one independently derived vector per message.
 The C and Rust compilers implement the same interface:
 
 ```text
-wfc check protocol.wf.json5
-wfc protocol.wf.json5 --output build/protocol
+wfc check protocol.wf
+wfc protocol.wf --output build/protocol
 ```
 
 `check` stops after parsing, layout validation, and two-way execution of every
 vector. Without `check`, compilation is implied.
 
-Compilation creates `build/protocol.wfb` and `build/protocol.h`. The `.wfb` is
+Compilation creates `build/protocol.wi` and `build/protocol.h`. The `.wi` is
 a position-independent database. The header names message ordinals, record
 offsets, string sections, string slots, caller-field ordinals, and fixed wire
 sizes. It contains no generated functions or storage policy.

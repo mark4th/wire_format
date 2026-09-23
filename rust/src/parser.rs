@@ -36,6 +36,7 @@ pub struct WireFormat<'a, 'out> {
     u16s: [Option<&'a [u16]>; MAX_PARAMS],
     u32s: [Option<&'a [u32]>; MAX_PARAMS],
     vars: [Value; MAX_VARS],
+    slices: [Option<&'a [u8]>; MAX_PARAMS],
     formats: Option<&'a [&'a str]>,
     out: Option<&'out mut [u8]>,
     out_len: usize,
@@ -59,6 +60,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             u16s: [None; MAX_PARAMS],
             u32s: [None; MAX_PARAMS],
             vars: [Value::Int(0); MAX_VARS],
+            slices: [None; MAX_PARAMS],
             formats: None,
             out: None,
             out_len: 0,
@@ -79,6 +81,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                 Param::Int(value) => self.params[index] = Value::Int(value),
                 Param::Raw(bytes) => {
                     self.raw[index] = Some(bytes);
+                    self.slices[index] = Some(bytes);
                     self.params[index] = Value::Raw(index);
                 }
                 Param::U16s(values) => {
@@ -359,6 +362,35 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         Ok(())
     }
 
+    fn capture_remaining(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        if slot >= MAX_PARAMS {
+            return Err(Error::InvalidParam);
+        }
+        let input = self.input.ok_or(Error::InputUnavailable)?;
+        if self.in_pos > input.len() {
+            return Err(Error::InputEof);
+        }
+        self.slices[slot] = Some(&input[self.in_pos..]);
+        self.in_pos = input.len();
+        Ok(())
+    }
+
+    fn emit_slice(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        let values = self
+            .slices
+            .get(slot)
+            .and_then(|value| *value)
+            .ok_or(Error::RawUnavailable)?;
+        let mut index = 0;
+        while index < values.len() {
+            self.emit(values[index])?;
+            index += 1;
+        }
+        Ok(())
+    }
+
     fn encode_bit_field(&mut self) -> Result<(), Error> {
         let pos = self.pop_int()?;
         let width = self.pop_int()?;
@@ -425,6 +457,8 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                 self.emit_be_u64(raw as u64)
             }
             b'r' => self.emit_array(fmt, pos),
+            b'R' => self.capture_remaining(),
+            b'v' => self.emit_slice(),
             b'B' => {
                 let value = self.read_byte()?;
                 self.push(Value::Int(value as i64))
@@ -594,6 +628,15 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         self.abort_mask = mask;
     }
 
+    /// Attaches a zero-copy version-2 byte field to a caller-field slot.
+    pub fn set_slice(&mut self, slot: usize, bytes: &'a [u8]) -> Result<(), Error> {
+        if slot >= MAX_PARAMS {
+            return Err(Error::InvalidParam);
+        }
+        self.slices[slot] = Some(bytes);
+        Ok(())
+    }
+
     pub fn abort_mask(&self) -> u32 {
         self.abort_mask
     }
@@ -622,6 +665,11 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             Value::Int(value) => Some(value),
             Value::Raw(_) | Value::U16s(_) | Value::U32s(_) => None,
         }
+    }
+
+    /// Returns a zero-copy byte field captured by `%R`.
+    pub fn slice(&self, slot: usize) -> Option<&'a [u8]> {
+        self.slices.get(slot).and_then(|value| *value)
     }
 }
 

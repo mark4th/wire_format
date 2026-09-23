@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::source::{
-    ensure_value_fits, BitOrder, ByteOrder, Diagnostic, Field, FieldKind, FieldType, Message,
-    Protocol, Result, Vector,
+    ensure_value_fits, AssignmentValue, BitOrder, ByteOrder, Diagnostic, Field, FieldKind,
+    FieldType, Message, Protocol, Result, Vector,
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -75,14 +75,30 @@ fn ensure_text(text: &str, what: &str, location: crate::source::Location) -> Res
 pub struct Layout {
     pub offsets: Vec<usize>,
     pub octets: usize,
+    pub variable: bool,
 }
 
 impl Layout {
     pub fn new(message: &Message) -> Result<Self> {
         let mut offsets = Vec::with_capacity(message.fields.len());
         let mut bit_offset = 0usize;
+        let mut variable = false;
 
         for field in &message.fields {
+            if matches!(field.field_type, FieldType::Bytes) {
+                if bit_offset % 8 != 0 {
+                    return Err(Diagnostic {
+                        location: field.location,
+                        message: format!(
+                            "byte field `{}` begins at bit {}, not an octet boundary",
+                            field.name, bit_offset
+                        ),
+                    });
+                }
+                offsets.push(bit_offset);
+                variable = true;
+                continue;
+            }
             if field.field_type.is_scalar() && bit_offset % 8 != 0 {
                 return Err(Diagnostic {
                     location: field.location,
@@ -114,6 +130,7 @@ impl Layout {
         Ok(Self {
             offsets,
             octets: bit_offset / 8,
+            variable,
         })
     }
 }
@@ -162,7 +179,36 @@ fn check_vector(
                 ),
             });
         }
-        ensure_value_fits(assignment.value, field.field_type, assignment.location)?;
+        match (&assignment.value, field.field_type) {
+            (AssignmentValue::Unsigned(value), FieldType::Bits(width)) => {
+                ensure_value_fits(*value, FieldType::Bits(width), assignment.location)?
+            }
+            (AssignmentValue::Unsigned(value), FieldType::U8) => {
+                ensure_value_fits(*value, FieldType::U8, assignment.location)?
+            }
+            (AssignmentValue::Unsigned(value), FieldType::U16) => {
+                ensure_value_fits(*value, FieldType::U16, assignment.location)?
+            }
+            (AssignmentValue::Unsigned(value), FieldType::U32) => {
+                ensure_value_fits(*value, FieldType::U32, assignment.location)?
+            }
+            (AssignmentValue::Unsigned(value), FieldType::U64) => {
+                ensure_value_fits(*value, FieldType::U64, assignment.location)?
+            }
+            (AssignmentValue::Bytes(_), FieldType::Bytes) => {}
+            (AssignmentValue::Unsigned(_), FieldType::Bytes) => {
+                return Err(Diagnostic {
+                    location: assignment.location,
+                    message: format!("byte field `{}` requires an octet array", field.name),
+                });
+            }
+            (AssignmentValue::Bytes(_), _) => {
+                return Err(Diagnostic {
+                    location: assignment.location,
+                    message: format!("scalar field `{}` requires an unsigned integer", field.name),
+                });
+            }
+        }
     }
 
     for field in &message.fields {
@@ -179,7 +225,18 @@ fn check_vector(
         }
     }
 
-    if vector.wire.len() != layout.octets {
+    let variable_octets = message
+        .fields
+        .iter()
+        .find(|field| matches!(field.field_type, FieldType::Bytes))
+        .and_then(|field| assignments.get(field.name.as_str()))
+        .map(|assignment| match &assignment.value {
+            AssignmentValue::Bytes(bytes) => bytes.len(),
+            AssignmentValue::Unsigned(_) => 0,
+        })
+        .unwrap_or(0);
+    let wire_octets = layout.octets + variable_octets;
+    if vector.wire.len() != wire_octets {
         return Err(Diagnostic {
             location: vector.location,
             message: format!(
@@ -187,15 +244,24 @@ fn check_vector(
                 vector.name,
                 vector.wire.len(),
                 message.name,
-                layout.octets
+                wire_octets
             ),
         });
     }
 
-    let mut encoded = vec![0u8; layout.octets];
+    let mut encoded = vec![0u8; wire_octets];
     for (index, field) in message.fields.iter().enumerate() {
+        if matches!(field.field_type, FieldType::Bytes) {
+            if let AssignmentValue::Bytes(bytes) = &assignments[field.name.as_str()].value {
+                encoded[layout.octets..].copy_from_slice(bytes);
+            }
+            continue;
+        }
         let value = match field.kind {
-            FieldKind::Supplied => assignments[field.name.as_str()].value,
+            FieldKind::Supplied => match assignments[field.name.as_str()].value {
+                AssignmentValue::Unsigned(value) => value,
+                AssignmentValue::Bytes(_) => unreachable!(),
+            },
             FieldKind::Constant(value) => value,
         };
         write_field(
@@ -215,6 +281,21 @@ fn check_vector(
         .position(|(actual, wanted)| actual != wanted);
 
     for (index, field) in message.fields.iter().enumerate() {
+        if matches!(field.field_type, FieldType::Bytes) {
+            let AssignmentValue::Bytes(wanted) = &assignments[field.name.as_str()].value else {
+                unreachable!()
+            };
+            if &expected[layout.octets..] != wanted.as_slice() {
+                return Err(Diagnostic {
+                    location: vector.location,
+                    message: format!(
+                        "vector `{}` decodes byte field `{}` incorrectly",
+                        vector.name, field.name
+                    ),
+                });
+            }
+            continue;
+        }
         let decoded = read_field(
             &expected,
             layout.offsets[index],
@@ -233,7 +314,10 @@ fn check_vector(
                 });
             }
             FieldKind::Supplied => {
-                let wanted = assignments[field.name.as_str()].value;
+                let wanted = match assignments[field.name.as_str()].value {
+                    AssignmentValue::Unsigned(value) => value,
+                    AssignmentValue::Bytes(_) => unreachable!(),
+                };
                 if decoded != wanted {
                     return Err(Diagnostic {
                         location: vector.wire[layout.offsets[index] / 8].location,
@@ -271,6 +355,7 @@ fn write_field(
 ) {
     match field_type {
         FieldType::Bits(width) => write_bits(output, bit_offset, width, value, bit_order),
+        FieldType::Bytes => unreachable!(),
         _ => write_scalar(
             output,
             bit_offset / 8,
@@ -290,6 +375,7 @@ fn read_field(
 ) -> u64 {
     match field_type {
         FieldType::Bits(width) => read_bits(input, bit_offset, width, bit_order),
+        FieldType::Bytes => unreachable!(),
         _ => read_scalar(
             input,
             bit_offset / 8,

@@ -29,7 +29,8 @@ typedef enum {
     WFC_U8,
     WFC_U16,
     WFC_U32,
-    WFC_U64
+    WFC_U64,
+    WFC_BYTES
 } wfc_field_type_t;
 
 typedef struct {
@@ -45,6 +46,9 @@ typedef struct {
     char *name;
     wfc_location_t location;
     uint64_t value;
+    uint8_t *bytes;
+    size_t byte_count;
+    int is_bytes;
 } wfc_assignment_t;
 
 typedef struct {
@@ -67,6 +71,7 @@ typedef struct {
 } wfc_message_t;
 
 typedef struct {
+    uint16_t version;
     char *name;
     char *description;
     char *standard;

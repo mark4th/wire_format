@@ -55,7 +55,8 @@ static int message_layout(const wfc_message_t *message, size_t **offsets,
         uint8_t width = wfc_field_width(field);
         if (field->type != WFC_BITS && bit_offset % 8 != 0) {
             wfc_set_error(error, field->location,
-                          "scalar field `%s` begins at bit %zu, not an octet boundary",
+                          "%s field `%s` begins at bit %zu, not an octet boundary",
+                          field->type == WFC_BYTES ? "byte" : "scalar",
                           field->name, bit_offset);
             free(*offsets);
             *offsets = NULL;
@@ -177,6 +178,8 @@ static void write_field(uint8_t *output, size_t offset, const wfc_field_t *field
 {
     if (field->type == WFC_BITS)
         write_bits(output, offset, field->width, value, protocol->bit_order);
+    else if (field->type == WFC_BYTES)
+        return;
     else
         write_scalar(output, offset / 8, wfc_field_width(field) / 8, value,
                      protocol->byte_order);
@@ -188,6 +191,8 @@ static uint64_t read_field(const uint8_t *input, size_t offset,
 {
     if (field->type == WFC_BITS)
         return read_bits(input, offset, field->width, protocol->bit_order);
+    if (field->type == WFC_BYTES)
+        return 0;
     return read_scalar(input, offset / 8, wfc_field_width(field) / 8,
                        protocol->byte_order);
 }
@@ -200,6 +205,8 @@ static int check_vector(const wfc_protocol_t *protocol,
     uint8_t *encoded;
     size_t index;
     size_t mismatch = SIZE_MAX;
+    size_t variable_octets = 0;
+    size_t wire_octets;
 
     for (index = 0; index < vector->assignment_count; index++) {
         const wfc_assignment_t *assignment = &vector->assignments[index];
@@ -216,7 +223,19 @@ static int check_vector(const wfc_protocol_t *protocol,
                           vector->name, assignment->name);
             return 0;
         }
-        if (!wfc_value_fits(assignment->value, wfc_field_width(field))) {
+        if (field->type == WFC_BYTES && !assignment->is_bytes) {
+            wfc_set_error(error, assignment->location,
+                          "byte field `%s` requires an octet array", field->name);
+            return 0;
+        }
+        if (field->type != WFC_BYTES && assignment->is_bytes) {
+            wfc_set_error(error, assignment->location,
+                          "scalar field `%s` requires an unsigned integer", field->name);
+            return 0;
+        }
+        if (field->type == WFC_BYTES) {
+            variable_octets = assignment->byte_count;
+        } else if (!wfc_value_fits(assignment->value, wfc_field_width(field))) {
             wfc_set_error(error, assignment->location,
                           "value %llu does not fit in a %u-bit field",
                           (unsigned long long)assignment->value,
@@ -233,26 +252,37 @@ static int check_vector(const wfc_protocol_t *protocol,
             return 0;
         }
     }
-    if (vector->wire_count != octets) {
+    if (octets > SIZE_MAX - variable_octets) {
+        wfc_set_error(error, vector->location, "vector wire size exceeds host limit");
+        return 0;
+    }
+    wire_octets = octets + variable_octets;
+    if (vector->wire_count != wire_octets) {
         wfc_set_error(error, vector->location,
                       "vector `%s` has %zu wire octets; message `%s` requires %zu",
-                      vector->name, vector->wire_count, message->name, octets);
+                      vector->name, vector->wire_count, message->name, wire_octets);
         return 0;
     }
 
-    encoded = calloc(octets == 0 ? 1 : octets, 1);
+    encoded = calloc(wire_octets == 0 ? 1 : wire_octets, 1);
     if (encoded == NULL) {
         wfc_set_error(error, vector->location, "out of memory");
         return 0;
     }
     for (index = 0; index < message->field_count; index++) {
         const wfc_field_t *field = &message->fields[index];
+        const wfc_assignment_t *assignment;
+        if (field->type == WFC_BYTES) {
+            assignment = find_assignment(vector, field->name);
+            memcpy(encoded + octets, assignment->bytes, assignment->byte_count);
+            continue;
+        }
         uint64_t value = field->is_constant
                              ? field->constant
                              : find_assignment(vector, field->name)->value;
         write_field(encoded, offsets[index], field, value, protocol);
     }
-    for (index = 0; index < octets; index++)
+    for (index = 0; index < wire_octets; index++)
         if (encoded[index] != vector->wire[index]) {
             mismatch = index;
             break;
@@ -260,6 +290,19 @@ static int check_vector(const wfc_protocol_t *protocol,
 
     for (index = 0; index < message->field_count; index++) {
         const wfc_field_t *field = &message->fields[index];
+        if (field->type == WFC_BYTES) {
+            const wfc_assignment_t *wanted = find_assignment(vector, field->name);
+            if (wanted->byte_count != vector->wire_count - octets ||
+                memcmp(wanted->bytes, vector->wire + octets,
+                       wanted->byte_count) != 0) {
+                wfc_set_error(error, vector->location,
+                              "vector `%s` decodes byte field `%s` incorrectly",
+                              vector->name, field->name);
+                free(encoded);
+                return 0;
+            }
+            continue;
+        }
         uint64_t decoded = read_field(vector->wire, offsets[index], field, protocol);
         if (field->is_constant && decoded != field->constant) {
             wfc_set_error(error, vector->location,

@@ -267,6 +267,25 @@ int main(void)
         ck("fatal fault recorded", v.faults, 4);
     }
 
+    // ---- version 2 zero-copy variable byte fields ------------------
+    printf("VERSION 2 SLICES\n");
+    {
+        static const uint8_t tail[] = { 0xaa, 0xbb, 0xcc };
+        static const uint8_t input[] = { 0x12, 0x34, 0xaa, 0xbb, 0xcc };
+
+        wi_init(&v, buf, sizeof buf, NULL, 0);
+        ck("set encode slice", wi_set_slice(&v, 2, tail, sizeof tail), 0);
+        n = wi_parse(&v, "%{4660}%w%{2}%v");
+        ck("slice encode length", n, sizeof input);
+        ck("slice encode bytes", memcmp(buf, input, sizeof input), 0);
+
+        wi_decode_init(&v, input, sizeof input, NULL, 0);
+        wi_parse(&v, "%S%Pa%{2}%R");
+        ck("slice decode scalar", v.vars[0], 0x1234);
+        ck("slice decode length", v.slices[2].length, sizeof tail);
+        ck("slice decode bytes", memcmp(v.slices[2].data, tail, sizeof tail), 0);
+    }
+
     printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n], %: and %rN work");
     return fails != 0;
 }

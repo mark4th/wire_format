@@ -3,8 +3,8 @@
 
   protocol: {
     name: 'example-telemetry',
-    description: 'A small example used to exercise the source compiler',
-    standard: 'Example 1',
+    description: 'A synthetic protocol-neutral example used to exercise the source compiler',
+    standard: 'None (synthetic example)',
     reference: '../../doc/WF_FILE_FORMAT.md',
 
     byte_order: 'big-endian',

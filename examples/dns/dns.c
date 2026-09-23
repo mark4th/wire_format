@@ -24,9 +24,9 @@ static int dns_database_valid(void)
 {
     size_t size = (size_t)(wi_dns_database_end - wi_dns_database_start);
 
-    return size == DNS_WFB_FILE_SIZE
+    return size == DNS_WI_FILE_SIZE
         && size >= 64
-        && memcmp(wi_dns_database_start, "WFB\0", 4) == 0
+        && memcmp(wi_dns_database_start, "WI\0\0", 4) == 0
         && get_u32(wi_dns_database_start + 8) == size;
 }
 
@@ -40,9 +40,9 @@ static const char *dns_string(uint32_t section, uint32_t slot)
     if (!dns_database_valid() || entry > size || size - entry < 4)
         return NULL;
     relative = get_u32(wi_dns_database_start + entry);
-    if (relative == DNS_WFB_NO_STRING)
+    if (relative == DNS_WI_NO_STRING)
         return NULL;
-    offset = (size_t)DNS_WFB_STRING_TABLE_OFFSET + relative;
+    offset = (size_t)DNS_WI_STRING_TABLE_OFFSET + relative;
     if (offset >= size || memchr(wi_dns_database_start + offset, 0, size - offset) == NULL)
         return NULL;
     return (const char *)(wi_dns_database_start + offset);

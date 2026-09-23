@@ -12,7 +12,7 @@ pub struct OutputPaths {
 impl OutputPaths {
     pub fn new(stem: &Path) -> io::Result<Self> {
         let header = append_suffix(stem, ".h");
-        let binary = append_suffix(stem, ".wfb");
+        let binary = append_suffix(stem, ".wi");
 
         Ok(Self { header, binary })
     }

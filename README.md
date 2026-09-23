@@ -2,45 +2,47 @@
 
 The human-readable protocol source language is defined in
 [doc/WF_FILE_FORMAT.md](doc/WF_FILE_FORMAT.md).
+Version 2's variable byte-tail extension is defined in
+[doc/WF_FILE_FORMAT_V2.md](doc/WF_FILE_FORMAT_V2.md).
 
 Build and run the C compiler with:
 
 ```sh
 make wfc
-./wfc check examples/source-format/example-telemetry.wf.json5
+./wfc check examples/source-format/example-telemetry.wf
 ```
 
 With no `check` command, compilation is implied.  The compiler emits a
 position-independent binary database and its symbolic C header:
 
 ```sh
-./wfc examples/source-format/example-telemetry.wf.json5 \
+./wfc examples/source-format/example-telemetry.wf \
     --output build/example_telemetry
 ```
 
 An independent Rust implementation has the same interface:
 
 ```sh
-cargo run -p wfc -- check examples/source-format/example-telemetry.wf.json5
+cargo run -p wfc -- check examples/source-format/example-telemetry.wf
 ```
 
 The C compiler carries its JSON5 parser under `compiler/`. The Rust compiler's
 JSON5 and Serde crates are confined to `rust/wfc/`. Neither the C nor Rust
 run-time interpreter contains a JSON parser or depends on one.
 
-This creates `build/example_telemetry.wfb` and `build/example_telemetry.h`.
+This creates `build/example_telemetry.wi` and `build/example_telemetry.h`.
 The binary may be read from storage, copied to memory, or embedded verbatim
 with an assembler `.incbin`.  The application chooses how it stores and finds
 the bytes.  `wfc` does not generate a loader or impose a linking policy.
 
 The compiled binary layout is defined in
-[doc/WFB_FILE_FORMAT.md](doc/WFB_FILE_FORMAT.md).
+[doc/WI_FILE_FORMAT.md](doc/WI_FILE_FORMAT.md).
 
 ## What it is
 
 wire_format is a compact, data-driven binary protocol encoder and decoder built
 around a format string interpreter. Each message type is described in a
-`.wf.json5` source file. `wfc` checks the source and compiles it into a `.wfb`
+`.wf` source file. `wfc` checks the source and compiles it into a `.wi`
 database containing encode and decode programs plus descriptive metadata. A
 single generic parser executes those programs; no special codec function is
 needed per message type. Small applications may still use format strings
@@ -113,6 +115,8 @@ braced index is rejected instead of indexing outside the parameter array.
 | `%q`      | emit 8 bytes big-endian (uint64) |
 | `%r`/`%r1` | emit raw bytes: TOS = count, next = pointer |
 | `%r2`/`%r4` | emit a count of native uint16/uint32 elements as big-endian |
+| `%v`      | emit the zero-copy byte slice in the popped slot |
+| `%R`      | decode all remaining input into the popped zero-copy slice slot |
 | `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
 | `%:`      | pop a repeat count for the next `%[n]` |
 
@@ -339,8 +343,8 @@ policy and is left unchanged.
 
 DNS (RFC 1035) was chosen as the demonstration protocol because it is
 well-known, fully specified, binary, and small enough to follow. Its source is
-[`examples/dns/dns.wf.json5`](examples/dns/dns.wf.json5). The build checks that
-source, compiles it to `.wfb` plus a symbolic header, and embeds the `.wfb` with
+[`examples/dns/dns.wf`](examples/dns/dns.wf). The build checks that
+source, compiles it to `.wi` plus a symbolic header, and embeds the `.wi` with
 `.incbin`. The C code looks up the generated encode and decode programs instead
 of containing hand-written format strings.
 
@@ -571,24 +575,25 @@ After parsing, `v.vars[0]` holds the version and `v.vars[1]` holds IHL.
 
 ## Compiled protocol database
 
-`wfc` turns a `.wf.json5` source into one `.wfb` database. JSON5 permits the
+`wfc` turns a `.wf` source into one `.wi` database. JSON5 permits the
 comments, hexadecimal values, and trailing commas expected in a maintained
 protocol definition. The C and Rust compilers consume the same source and must
 produce byte-for-byte identical output.
 
-The `.wfb` contains a fixed
-header, one fixed-size record per message, field-value metadata, an array of
+The `.wi` contains a fixed
+header, one fixed-size metadata record per message, field-value metadata, an array of
 string offsets, and one common string table.  Every location stored in the
 file is an integer offset.  It contains no pointers, native C structures, or
 host alignment.
 
 The associated `.h` names message ordinals, message-record offsets,
-string-section offsets, string slots, caller-field ordinals, and fixed wire
-sizes.  A message string section contains offsets into the common string table,
+string-section offsets, string slots, caller-field ordinals, fixed-prefix wire
+sizes, and whether a message has a variable byte tail. A message string section
+contains offsets into the common string table,
 following the same indirection used by compiled `terminfo` entries.  It holds
 the message name, description, encode and decode programs, and field names.
 
-How an application makes the `.wfb` bytes available is deliberately not part
+How an application makes the `.wi` bytes available is deliberately not part
 of the format.  A hosted application can load the file.  Firmware can place it
 in flash with `.incbin`, package it in another image, or copy it from external
 storage.  All of those choices expose the same bytes to the interpreter.
@@ -599,9 +604,9 @@ storage.  All of those choices expose the same bytes to the interpreter.
 
 Adding a new message type requires:
 
-1. Add the message and its independently derived vectors to the `.wf.json5`
+1. Add the message and its independently derived vectors to the `.wf`
    source.
-2. Run `wfc` to check the vectors and produce the `.wfb` database and symbolic
+2. Run `wfc` to check the vectors and produce the `.wi` database and symbolic
    header.
 3. Load or embed the database and obtain the generated encode or decode program.
 4. Initialize `wi_vars_t` and pass that program to `wi_parse()`.
@@ -634,7 +639,7 @@ static void _wl(void)
 }
 
 // in ops[]:
-{ 'v', _wl },
+{ 'l', _wl },
 ```
 
 All existing format strings are unaffected.
@@ -698,7 +703,7 @@ are available with `WireFormat::faults()` after a parse.
 |-----------------|---------|
 | `wire_format.h` | public API and types |
 | `wire_format.c` | C format string parser |
-| `compiler/` | C JSON5 parser, source checker, and `.wfb` compiler |
+| `compiler/` | C JSON5 parser, source checker, and `.wi` compiler |
 | `Cargo.toml` | Cargo workspace manifest |
 | `rust/Cargo.toml` | Rust crate manifest |
 | `rust/src/lib.rs` | Rust crate facade and public re-exports |
@@ -708,12 +713,13 @@ are available with `WireFormat::faults()` after a parse.
 | `rust/src/ops.rs` | Rust arithmetic, variable, and bit-field helpers |
 | `rust/src/parser.rs` | Rust `WireFormat` parser engine |
 | `rust/src/tests.rs` | Rust unit tests |
-| `rust/wfc/` | independent Rust JSON5 checker and `.wfb` compiler |
+| `rust/wfc/` | independent Rust JSON5 checker and `.wi` compiler |
 | `rust/wfc/tests/wfc_cli.rs` | Rust `wfc` command-line and `.incbin` integration tests |
 | `tests/wfc_conformance.sh` | C/Rust byte-for-byte compiler conformance test |
-| `doc/WF_FILE_FORMAT.md` | normative `.wf.json5` source-format definition |
-| `doc/WFB_FILE_FORMAT.md` | normative compiled binary format |
+| `doc/WF_FILE_FORMAT.md` | normative `.wf` source-format definition |
+| `doc/WI_FILE_FORMAT.md` | normative compiled binary format |
 | `schema/wire-format-v1.schema.json` | JSON Schema for source-format version 1 |
+| `schema/wire-format-v2.schema.json` | JSON Schema for source-format version 2 |
 | `examples/dns/` | C DNS demo, JSON5 protocol source, and embedded database wrapper |
 | `examples/source-format/` | Small source-compiler example |
 | `examples/telemetry/` | Standalone Rust telemetry-frame example |

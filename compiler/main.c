@@ -18,8 +18,8 @@ typedef enum {
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s check protocol.wf.json5\n", program);
-    fprintf(stderr, "       %s protocol.wf.json5 --output path/stem\n", program);
+    fprintf(stderr, "usage: %s check protocol.wf\n", program);
+    fprintf(stderr, "       %s protocol.wf --output path/stem\n", program);
 }
 
 static const char *plural(size_t count)
@@ -161,7 +161,7 @@ static int write_outputs(const char *stem, const wfc_generated_t *generated)
     char nonce[64];
     char old_nonce[72];
     char *header = append_suffix(stem, ".h");
-    char *binary = append_suffix(stem, ".wfb");
+    char *binary = append_suffix(stem, ".wi");
     char *header_temp = NULL;
     char *binary_temp = NULL;
     char *header_backup = NULL;
@@ -245,13 +245,13 @@ int main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc < 2) {
-        fprintf(stderr, "error: expected a .wf.json5 file or the `check` command\n");
+        fprintf(stderr, "error: expected a .wf file or the `check` command\n");
         usage(argv[0]);
         return 2;
     }
     if (strcmp(argv[1], "check") == 0) {
         if (argc != 3) {
-            fprintf(stderr, "error: `check` requires exactly one .wf.json5 file\n");
+            fprintf(stderr, "error: `check` requires exactly one .wf file\n");
             usage(argv[0]);
             return 2;
         }
@@ -311,7 +311,7 @@ int main(int argc, char **argv)
     }
     if (!write_outputs(output, &generated))
         goto done;
-    printf("%s: compiled protocol `%s` (%zu message%s, %zu vector%s) -> %s.h, %s.wfb\n",
+    printf("%s: compiled protocol `%s` (%zu message%s, %zu vector%s) -> %s.h, %s.wi\n",
            input, protocol.name, summary.messages, plural(summary.messages),
            summary.vectors, plural(summary.vectors), output, output);
     result = EXIT_SUCCESS;

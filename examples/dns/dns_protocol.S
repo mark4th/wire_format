@@ -3,7 +3,7 @@
     .globl wi_dns_database_start
     .globl wi_dns_database_end
 wi_dns_database_start:
-    .incbin "target/examples/dns/dns_protocol.wfb"
+    .incbin "target/examples/dns/dns_protocol.wi"
 wi_dns_database_end:
 
     .section .note.GNU-stack,"",@progbits

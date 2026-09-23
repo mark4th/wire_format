@@ -167,7 +167,7 @@ static int name_value(const json5_value_t *object, const char *what,
 }
 
 static int parse_field(const json5_value_t *source, wfc_field_t *field,
-                       wfc_error_t *error)
+                       uint16_t version, wfc_error_t *error)
 {
     static const char *const allowed[] = {"name", "type", "width", "constant"};
     const json5_value_t *type_value;
@@ -220,9 +220,18 @@ static int parse_field(const json5_value_t *source, wfc_field_t *field,
             field->type = WFC_U32;
         else if (strcmp(type, "u64") == 0)
             field->type = WFC_U64;
-        else {
+        else if (strcmp(type, "bytes") == 0) {
+            if (version < 2) {
+                wfc_set_error(error, location_of(type_value),
+                              "byte field `%s` requires wire_format version 2",
+                              field->name);
+                free(type);
+                return 0;
+            }
+            field->type = WFC_BYTES;
+        } else {
             wfc_set_error(error, location_of(type_value),
-                          "field `%s` type must be `bits`, `u8`, `u16`, `u32`, or `u64`",
+                          "field `%s` type must be `bits`, `u8`, `u16`, `u32`, `u64`, or `bytes`",
                           field->name);
             free(type);
             return 0;
@@ -231,6 +240,11 @@ static int parse_field(const json5_value_t *source, wfc_field_t *field,
     free(type);
 
     constant_value = find_member(source, "constant");
+    if (field->type == WFC_BYTES && constant_value != NULL) {
+        wfc_set_error(error, location_of(constant_value),
+                      "byte field `%s` may not specify `constant`", field->name);
+        return 0;
+    }
     if (constant_value != NULL) {
         field->is_constant = 1;
         if (!parse_u64(constant_value, "field constant", &field->constant, error))
@@ -298,8 +312,32 @@ static int parse_vector(const json5_value_t *source, wfc_vector_t *vector,
                               "duplicate vector value `%s`", assignment->name);
                 return 0;
             }
-        if (!parse_u64(member->value, "vector value", &assignment->value, error))
+        if (member->value->type == JSON5_ARRAY) {
+            size_t byte_index;
+            assignment->is_bytes = 1;
+            assignment->byte_count = member->value->as.array.count;
+            assignment->bytes = malloc(assignment->byte_count == 0
+                                           ? 1
+                                           : assignment->byte_count);
+            if (assignment->bytes == NULL) {
+                wfc_set_error(error, assignment->location, "out of memory");
+                return 0;
+            }
+            for (byte_index = 0; byte_index < assignment->byte_count; byte_index++) {
+                uint64_t octet;
+                const json5_value_t *item = member->value->as.array.items[byte_index];
+                if (!parse_u64(item, "vector byte value", &octet, error))
+                    return 0;
+                if (octet > 255) {
+                    wfc_set_error(error, location_of(item),
+                                  "vector byte value exceeds 255");
+                    return 0;
+                }
+                assignment->bytes[byte_index] = (uint8_t)octet;
+            }
+        } else if (!parse_u64(member->value, "vector value", &assignment->value, error)) {
             return 0;
+        }
     }
 
     if (wire->type != JSON5_ARRAY) {
@@ -332,7 +370,7 @@ static int parse_vector(const json5_value_t *source, wfc_vector_t *vector,
 }
 
 static int parse_message(const json5_value_t *source, wfc_message_t *message,
-                         wfc_error_t *error)
+                         uint16_t version, wfc_error_t *error)
 {
     static const char *const allowed[] = {"name", "description", "fields", "vectors"};
     const json5_value_t *description;
@@ -363,8 +401,16 @@ static int parse_message(const json5_value_t *source, wfc_message_t *message,
     }
     for (index = 0; index < message->field_count; index++) {
         size_t previous;
-        if (!parse_field(fields->as.array.items[index], &message->fields[index], error))
+        if (!parse_field(fields->as.array.items[index], &message->fields[index],
+                         version, error))
             return 0;
+        if (message->fields[index].type == WFC_BYTES &&
+            index + 1 != message->field_count) {
+            wfc_set_error(error, message->fields[index].location,
+                          "byte field `%s` must be the final field in its message",
+                          message->fields[index].name);
+            return 0;
+        }
         for (previous = 0; previous < index; previous++)
             if (strcmp(message->fields[index].name, message->fields[previous].name) == 0) {
                 wfc_set_error(error, message->fields[index].location,
@@ -401,7 +447,7 @@ static int parse_message(const json5_value_t *source, wfc_message_t *message,
 }
 
 static int parse_protocol(const json5_value_t *source, wfc_protocol_t *protocol,
-                          wfc_error_t *error)
+                          uint16_t version, wfc_error_t *error)
 {
     static const char *const allowed[] = {
         "name", "description", "standard", "reference",
@@ -480,7 +526,8 @@ static int parse_protocol(const json5_value_t *source, wfc_protocol_t *protocol,
     }
     for (index = 0; index < protocol->message_count; index++) {
         size_t previous;
-        if (!parse_message(messages->as.array.items[index], &protocol->messages[index], error))
+        if (!parse_message(messages->as.array.items[index], &protocol->messages[index],
+                           version, error))
             return 0;
         for (previous = 0; previous < index; previous++)
             if (strcmp(protocol->messages[index].name, protocol->messages[previous].name) == 0) {
@@ -518,13 +565,14 @@ int wfc_source_parse(const char *text, size_t length, wfc_protocol_t *protocol,
     if (version == NULL || source_protocol == NULL ||
         !parse_u64(version, "wire_format", &version_number, error))
         goto done;
-    if (version_number != 1) {
+    if (version_number != 1 && version_number != 2) {
         wfc_set_error(error, location_of(version),
-                      "unsupported wire_format version %llu; expected 1",
+                      "unsupported wire_format version %llu; expected 1 or 2",
                       (unsigned long long)version_number);
         goto done;
     }
-    success = parse_protocol(source_protocol, protocol, error);
+    protocol->version = (uint16_t)version_number;
+    success = parse_protocol(source_protocol, protocol, protocol->version, error);
 
 done:
     json5_free(root);
@@ -554,8 +602,11 @@ void wfc_protocol_free(wfc_protocol_t *protocol)
             size_t assignment_index;
             free(vector->name);
             for (assignment_index = 0; assignment_index < vector->assignment_count;
-                 assignment_index++)
+                assignment_index++)
+            {
                 free(vector->assignments[assignment_index].name);
+                free(vector->assignments[assignment_index].bytes);
+            }
             free(vector->assignments);
             free(vector->wire);
         }

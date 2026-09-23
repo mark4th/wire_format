@@ -34,7 +34,7 @@ fn temporary_directory(label: &str) -> PathBuf {
     ))
 }
 
-fn compile_wfb(source: &str, stem_name: &str) -> (PathBuf, PathBuf, Vec<u8>, Vec<u8>) {
+fn compile_wi(source: &str, stem_name: &str) -> (PathBuf, PathBuf, Vec<u8>, Vec<u8>) {
     let directory = temporary_directory(stem_name);
     let stem = directory.join(stem_name);
 
@@ -47,7 +47,7 @@ fn compile_wfb(source: &str, stem_name: &str) -> (PathBuf, PathBuf, Vec<u8>, Vec
     assert_success(&generated, "wfc compilation");
 
     let first_header = fs::read(stem.with_extension("h")).unwrap();
-    let first_binary = fs::read(stem.with_extension("wfb")).unwrap();
+    let first_binary = fs::read(stem.with_extension("wi")).unwrap();
     let regenerated = Command::new(env!("CARGO_BIN_EXE_wfc"))
         .arg(manifest_path(source))
         .arg("--output")
@@ -56,7 +56,7 @@ fn compile_wfb(source: &str, stem_name: &str) -> (PathBuf, PathBuf, Vec<u8>, Vec
         .expect("wfc must run again");
     assert_success(&regenerated, "repeat wfc compilation");
     assert_eq!(fs::read(stem.with_extension("h")).unwrap(), first_header);
-    assert_eq!(fs::read(stem.with_extension("wfb")).unwrap(), first_binary);
+    assert_eq!(fs::read(stem.with_extension("wi")).unwrap(), first_binary);
 
     (directory, stem, first_header, first_binary)
 }
@@ -78,8 +78,8 @@ fn string_at(bytes: &[u8], section: u32, slot: u32) -> &str {
     std::str::from_utf8(&bytes[start..start + length]).unwrap()
 }
 
-fn assert_wfb_header(binary: &[u8]) {
-    assert_eq!(&binary[..4], b"WFB\0");
+fn assert_wi_header(binary: &[u8]) {
+    assert_eq!(&binary[..4], b"WI\0\0");
     assert_eq!(u16_at(binary, 4), 1);
     assert_eq!(u16_at(binary, 6), HEADER_SIZE as u16);
     assert_eq!(u32_at(binary, 8) as usize, binary.len());
@@ -96,7 +96,7 @@ fn assert_wfb_header(binary: &[u8]) {
 
 #[test]
 fn checks_the_example_source_from_the_command_line() {
-    let source = manifest_path("examples/source-format/example-telemetry.wf.json5");
+    let source = manifest_path("examples/source-format/example-telemetry.wf");
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
         .arg("check")
         .arg(source)
@@ -112,7 +112,7 @@ fn checks_the_example_source_from_the_command_line() {
 #[test]
 fn compilation_requires_an_output_stem() {
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
-        .arg("example.wf.json5")
+        .arg("example.wf")
         .output()
         .expect("wfc must run");
 
@@ -123,7 +123,7 @@ fn compilation_requires_an_output_stem() {
 #[test]
 fn language_backends_are_not_part_of_the_interface() {
     let output = Command::new(env!("CARGO_BIN_EXE_wfc"))
-        .args(["example.wf.json5", "--output", "example", "--language", "c"])
+        .args(["example.wf", "--output", "example", "--language", "c"])
         .output()
         .expect("wfc must run");
 
@@ -132,12 +132,12 @@ fn language_backends_are_not_part_of_the_interface() {
 }
 
 #[test]
-fn compiles_loadable_and_incbin_compatible_wfb() {
-    let (directory, _stem, header, binary) = compile_wfb(
-        "examples/source-format/example-telemetry.wf.json5",
+fn compiles_loadable_and_incbin_compatible_wi() {
+    let (directory, _stem, header, binary) = compile_wi(
+        "examples/source-format/example-telemetry.wf",
         "example_telemetry",
     );
-    assert_wfb_header(&binary);
+    assert_wi_header(&binary);
     assert_eq!(u32_at(&binary, 16), 1);
 
     let protocol_strings = u32_at(&binary, 36);
@@ -162,8 +162,8 @@ fn compiles_loadable_and_incbin_compatible_wfb() {
         .arg(manifest_path("."))
         .arg("-I")
         .arg(&directory)
-        .arg(manifest_path("tests/wfc_wfb_harness.c"))
-        .arg(manifest_path("tests/wfc_wfb_incbin.S"))
+        .arg(manifest_path("tests/wfc_wi_harness.c"))
+        .arg(manifest_path("tests/wfc_wi_incbin.S"))
         .arg(manifest_path("wire_format.c"))
         .arg("-o")
         .arg(&executable)
@@ -174,15 +174,15 @@ fn compiles_loadable_and_incbin_compatible_wfb() {
     let ran = Command::new(&executable)
         .output()
         .expect("the incbin application must run");
-    assert_success(&ran, "using an incbin WFB");
+    assert_success(&ran, "using an incbin WI");
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn compiles_crossing_bits_little_endian_and_u64_metadata() {
     let (directory, _stem, _header, binary) =
-        compile_wfb("tests/data/wfc-types.wf.json5", "compiled_types");
-    assert_wfb_header(&binary);
+        compile_wi("tests/data/wfc-types.wf", "compiled_types");
+    assert_wi_header(&binary);
     assert_eq!(u32_at(&binary, 12), 3);
     assert_eq!(u32_at(&binary, 16), 3);
     let protocol_strings = u32_at(&binary, 36) as usize;

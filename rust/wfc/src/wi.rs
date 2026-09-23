@@ -6,7 +6,8 @@ use crate::source::{
     Result,
 };
 
-pub const MAGIC: &[u8; 4] = b"WFB\0";
+pub const MAGIC: &[u8; 4] = b"WI\0\0";
+#[cfg(test)]
 pub const FORMAT_VERSION: u16 = 1;
 pub const HEADER_SIZE: u32 = 64;
 pub const MESSAGE_RECORD_SIZE: u32 = 32;
@@ -128,7 +129,7 @@ fn scalar_swap(field_type: FieldType, byte_order: ByteOrder) -> u8 {
         FieldType::U16 => 2,
         FieldType::U32 => 4,
         FieldType::U64 => 8,
-        FieldType::Bits(_) | FieldType::U8 => 0,
+        FieldType::Bits(_) | FieldType::U8 | FieldType::Bytes => 0,
     }
 }
 
@@ -141,6 +142,10 @@ fn compile_field(
 ) -> (String, String) {
     match field.field_type {
         FieldType::Bits(width) => compile_bits(field, bit_offset, width, supplied_index, bit_order),
+        FieldType::Bytes => {
+            let index = supplied_index.expect("a byte field cannot be constant");
+            (format!("%{{{index}}}%v"), format!("%{{{index}}}%R"))
+        }
         scalar => compile_scalar(field, scalar, supplied_index, byte_order),
     }
 }
@@ -158,14 +163,14 @@ fn compile_scalar(
             FieldType::U16 => "%w",
             FieldType::U32 => "%W",
             FieldType::U64 => "%q",
-            FieldType::Bits(_) => unreachable!(),
+            FieldType::Bits(_) | FieldType::Bytes => unreachable!(),
         };
         let decode_op = match field_type {
             FieldType::U8 => "%B",
             FieldType::U16 => "%S",
             FieldType::U32 => "%L",
             FieldType::U64 => "%Q",
-            FieldType::Bits(_) => unreachable!(),
+            FieldType::Bits(_) | FieldType::Bytes => unreachable!(),
         };
         return (
             format!("%p{{{}}}{encode_op}", index + 1),
@@ -497,7 +502,7 @@ fn build_image(protocol: &Protocol, messages: &[CompiledMessage<'_>]) -> Result<
 
     let mut bytes = Vec::with_capacity(file_size);
     bytes.extend_from_slice(MAGIC);
-    put_u16(&mut bytes, FORMAT_VERSION);
+    put_u16(&mut bytes, protocol.version);
     put_u16(&mut bytes, HEADER_SIZE as u16);
     put_u32(
         &mut bytes,
@@ -542,7 +547,7 @@ fn build_image(protocol: &Protocol, messages: &[CompiledMessage<'_>]) -> Result<
         );
         put_u32(&mut bytes, record.value_widths_offset);
         put_u32(&mut bytes, record.value_swaps_offset);
-        put_u32(&mut bytes, 0);
+        put_u32(&mut bytes, u32::from(compiled.layout.variable));
         put_u32(&mut bytes, 0);
     }
     debug_assert_eq!(bytes.len(), value_table_offset);
@@ -592,7 +597,7 @@ fn align4(value: usize, location: Location) -> Result<usize> {
 
 fn to_u32(value: usize, location: Location, what: &str) -> Result<u32> {
     u32::try_from(value)
-        .map_err(|_| Diagnostic::new(location, format!("{what} exceeds the WFB 32-bit limit")))
+        .map_err(|_| Diagnostic::new(location, format!("{what} exceeds the WI 32-bit limit")))
 }
 
 fn put_u16(output: &mut Vec<u8>, value: u16) {
@@ -617,69 +622,69 @@ fn generate_header(protocol: &Protocol, messages: &[CompiledMessage<'_>], image:
     writeln!(output, "#define {guard}\n").unwrap();
     define(
         &mut output,
-        &format!("{prefix}_WFB_FORMAT_VERSION"),
-        u32::from(FORMAT_VERSION),
+        &format!("{prefix}_WI_FORMAT_VERSION"),
+        u32::from(protocol.version),
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_FILE_SIZE"),
+        &format!("{prefix}_WI_FILE_SIZE"),
         image.bytes.len() as u32,
     );
-    define(&mut output, &format!("{prefix}_WFB_FLAGS"), image.flags);
+    define(&mut output, &format!("{prefix}_WI_FLAGS"), image.flags);
     define(
         &mut output,
-        &format!("{prefix}_WFB_MESSAGE_COUNT"),
+        &format!("{prefix}_WI_MESSAGE_COUNT"),
         messages.len() as u32,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_MESSAGE_TABLE_OFFSET"),
+        &format!("{prefix}_WI_MESSAGE_TABLE_OFFSET"),
         image.message_table_offset,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_MESSAGE_RECORD_SIZE"),
+        &format!("{prefix}_WI_MESSAGE_RECORD_SIZE"),
         MESSAGE_RECORD_SIZE,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_VALUE_TABLE_OFFSET"),
+        &format!("{prefix}_WI_VALUE_TABLE_OFFSET"),
         image.value_table_offset,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_VALUE_TABLE_SIZE"),
+        &format!("{prefix}_WI_VALUE_TABLE_SIZE"),
         image.value_table_size,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_PROTOCOL_STRINGS_OFFSET"),
+        &format!("{prefix}_WI_PROTOCOL_STRINGS_OFFSET"),
         image.protocol_strings_offset,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_STRING_OFFSETS_OFFSET"),
+        &format!("{prefix}_WI_STRING_OFFSETS_OFFSET"),
         image.string_offsets_offset,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_STRING_OFFSET_COUNT"),
+        &format!("{prefix}_WI_STRING_OFFSET_COUNT"),
         image.string_offset_count,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_STRING_TABLE_OFFSET"),
+        &format!("{prefix}_WI_STRING_TABLE_OFFSET"),
         image.string_table_offset,
     );
     define(
         &mut output,
-        &format!("{prefix}_WFB_STRING_TABLE_SIZE"),
+        &format!("{prefix}_WI_STRING_TABLE_SIZE"),
         image.string_table_size,
     );
-    define(&mut output, &format!("{prefix}_WFB_NO_STRING"), NO_STRING);
+    define(&mut output, &format!("{prefix}_WI_NO_STRING"), NO_STRING);
     define(
         &mut output,
-        &format!("{prefix}_WFB_FAULT_FIXED_FIELD"),
+        &format!("{prefix}_WI_FAULT_FIXED_FIELD"),
         FIXED_FIELD_FAULT as u32,
     );
     output.push('\n');
@@ -760,6 +765,11 @@ fn generate_header(protocol: &Protocol, messages: &[CompiledMessage<'_>], image:
             &format!("{base}_WIRE_SIZE"),
             compiled.layout.octets as u32,
         );
+        define(
+            &mut output,
+            &format!("{base}_VARIABLE_WIRE_SIZE"),
+            u32::from(compiled.layout.variable),
+        );
         output.push('\n');
     }
 
@@ -819,7 +829,7 @@ mod tests {
 
     #[test]
     fn writes_portable_sections_and_string_offsets() {
-        let source = include_str!("../../../examples/source-format/example-telemetry.wf.json5");
+        let source = include_str!("../../../examples/source-format/example-telemetry.wf");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let compiled = protocol
@@ -853,7 +863,7 @@ mod tests {
 
     #[test]
     fn header_names_messages_fields_and_string_sections() {
-        let source = include_str!("../../../examples/source-format/example-telemetry.wf.json5");
+        let source = include_str!("../../../examples/source-format/example-telemetry.wf");
         let protocol = parse(source).unwrap();
         check(&protocol).unwrap();
         let generated = generate(&protocol).unwrap();

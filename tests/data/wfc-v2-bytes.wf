@@ -1,0 +1,28 @@
+{
+  wire_format: 2,
+  protocol: {
+    name: 'variable-tail',
+    description: 'Version 2 variable-length byte-tail conformance fixture',
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+    messages: [{
+      name: 'packet',
+      description: 'A fixed primary header followed by a zero-copy byte field',
+      fields: [
+        { name: 'version', type: 'bits', width: 3, constant: 1 },
+        { name: 'kind', type: 'bits', width: 5 },
+        { name: 'identifier', type: 'u16' },
+        { name: 'data', type: 'bytes' },
+      ],
+      vectors: [{
+        name: 'three-octets',
+        values: {
+          kind: 2,
+          identifier: 0x1234,
+          data: [0xaa, 0xbb, 0xcc],
+        },
+        wire: [0x22, 0x12, 0x34, 0xaa, 0xbb, 0xcc],
+      }],
+    }],
+  },
+}

@@ -13,6 +13,12 @@
 #define WI_MAX_PARAMS   16
 #define WI_MAX_VARS     26
 
+typedef struct
+{
+    const uint8_t *data;
+    size_t         length;
+} wi_slice_t;
+
 // ⚠ HOW DEEP %[n] MAY NEST.  each frame is a return address, the
 // caller's index, the called format's start and a loop counter - 28
 // bytes, so eight frames is 224.
@@ -51,6 +57,7 @@ typedef struct
 
     int64_t  params[WI_MAX_PARAMS];     // caller-supplied parameters
     int64_t  vars[WI_MAX_VARS];         // variables a-z; A-Z are aliases
+    wi_slice_t slices[WI_MAX_PARAMS];   // zero-copy fields captured by %R
 
     uint8_t       *out;                 // output buffer (encode)
     size_t         out_size;            // output buffer capacity
@@ -130,6 +137,11 @@ void    wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
 // not assumed, so a large flat table is fine.
 
 int     wi_set_formats(wi_vars_t *v, const char **fmts, int nfmts);
+
+// Attach a zero-copy byte slice to a caller-field slot.  Version-2 encode
+// programs emit it with %v; version-2 decode programs expose captured %R data
+// through v->slices[slot].  Call after wi_init()/wi_decode_init().
+int     wi_set_slice(wi_vars_t *v, int slot, const uint8_t *data, size_t length);
 
 // ⚠ CHECK v->overrun AFTER PARSING.  the return value is the length
 // produced, which for a truncated encode is a short but plausible
