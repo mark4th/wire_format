@@ -1,5 +1,14 @@
 # The `.wf` source format
 
+This document specifies **source-format revision 1**, not library release 1.
+Its C/Rust JSON5 compilers were added in development commit
+[`ba74aaa`](https://github.com/mark4th/wire_format/commit/ba74aaa)
+(2026-09-22); the current `.wi` container followed in `bf6fc14` (2026-09-23).
+There is no separate tagged library release for these additions. Revision 1
+remains supported by the current C and Rust implementations. See
+[versioning and feature history](VERSIONING.md) for release provenance and
+the compatibility policy.
+
 ## Purpose
 
 A `.wf` file is the human-readable description of one wire protocol.

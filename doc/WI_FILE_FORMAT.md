@@ -1,5 +1,12 @@
 # The compiled `.wi` format
 
+Version numbers in this document identify **compiled-format revisions**, not
+library releases. The current compilers emit a revision matching the input
+`.wf` source revision. See [versioning and feature history](VERSIONING.md)
+for what each revision added, when its implementation appeared, and the
+backward-compatibility policy. The initial sections describe revision 1;
+later sections specify revisions 2–4.
+
 ## Purpose
 
 `wfc` compiles one human-readable `.wf` protocol description into two files:
@@ -208,7 +215,7 @@ record lists. Selector-driven choices compile to conditionals containing one
 `%J[n]` call for each declared case. These additions change format programs
 and runtime inputs, but do not add binary sections or change record offsets.
 
-## Named-record extension
+## Version 4 additions: named records
 
 Version 4 keeps the header, message rows and encode/decode string slots and
 adds field metadata plus named operands for the same runtime interpreter.

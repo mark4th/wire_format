@@ -1,5 +1,12 @@
 # Named records in wire_info format strings
 
+This guide describes **source/compiled-format revision 4**, not library
+release 4. Its C support was added in development commit
+[`92f5533`](https://github.com/mark4th/wire_format/commit/92f5533)
+(2026-09-29), with no separate tagged library release. Rust support has not
+been implemented. Earlier C features remain supported through their existing
+interfaces; see [versioning and feature history](VERSIONING.md).
+
 The C `wfc` compiler reads `.wf` sources (JSON5) and writes `.wi` files
 containing **encode/decode format strings and their lookup table**. `wire_info`
 loads that table, binds caller records, and invokes `wi_parse()` in
@@ -22,7 +29,8 @@ strings build/protocol.wi
 ```
 
 Libraries are `target/wire-info/libwire_info.a` and `libwire_info.so.4` (with a
-`.so` symlink). Both include the loader and the existing format interpreter.
+`.so` symlink). The `.4` identifies the shared-library ABI, not a library release.
+Both include the loader and the existing format interpreter.
 `INFO_BUILD` selects an independent output directory. All applications reuse
 these libraries. `install-info` installs the C compiler, libraries and public
 headers. Python is used by the tests and example catalog builder, not `wfc`.

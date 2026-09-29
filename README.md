@@ -298,8 +298,8 @@ The original stack operations interpret values as signed 64-bit integers.
 Moving all 64 bits through `%q` and `%Q` preserves them, but `%>` and `%<`
 compare them as signed values. Use the unsigned `%u` operations when a
 calculation or comparison must treat the high bit as part of a positive
-unsigned value. The version 4 compiler uses those unsigned operations for
-its expressions.
+unsigned value. The C compiler uses those unsigned operations for expressions
+in source-format 4.
 
 ---
 
@@ -473,7 +473,7 @@ holds 16, and there are 26 letter variables.
 ### Using compiled named-record tables
 
 `wire_info.h` provides a higher-level public interface for compiled tables
-with named fields. It currently accepts version 4 `.wi` images, introduced
+with named fields. It currently accepts compiled-format 4 `.wi` images, introduced
 in the source-format section next. It still executes their format strings
 through `wi_parse()`.
 
@@ -529,10 +529,13 @@ The top-level object has exactly two properties:
 | `wire_format` | Integer source-format version: 1, 2, 3 or 4 |
 | `protocol` | The protocol object described below |
 
-The version chooses a source vocabulary and caller-data model. It is not the
-version number of the network protocol being described.
+The `wire_format` number chooses a source vocabulary and caller-data model.
+It is a **file-format revision, not a library release** or the version of the
+network protocol being described. The current compiler and Rust packages
+report `0.1.0`; that does not restrict them to source-format 1. Likewise, the
+`.4` in `libwire_info.so.4` identifies the shared-library ABI, not release 4.0.
 
-| Version | Source capabilities | Application interface | Compilers |
+| Source format | Features added | Application interface | Compilers |
 |---|---|---|---|
 | 1 | Fixed scalar and packed-bit records | Parameters, variables and generated ordinals | C and Rust |
 | 2 | Version 1 plus a final variable-length byte field | Also attached byte slices | C and Rust |
@@ -544,6 +547,30 @@ uses explicit expressions and named fields; its declarations are documented
 separately below rather than mixed into the earlier vocabulary. All use runtime
 format strings. The DNS example uses version 1; the CCSDS definitions use
 version 4. The Rust compiler and interpreter currently support versions 1–3.
+
+#### Library availability and backward compatibility
+
+The repository has no release tags establishing distinct library releases for
+these additions. The source-format 1 C/Rust compilers were implemented on
+2026-09-22; the current `.wi` container and source-format 2 followed on
+2026-09-23; source formats 3 and 4 were implemented on 2026-09-29. These are
+development-history dates, not library release numbers. The
+[feature history](doc/VERSIONING.md) identifies the implementation commits,
+including the earlier additions to the format-string interpreter. Future
+releases will record “Added in library X.Y.Z” for each new feature.
+
+New library versions must continue supporting earlier documented features
+unless an explicit deprecation is documented. None of the documented
+revisions 1–4 is currently deprecated. **Keep existing `.wf` revision numbers
+when upgrading the library**; changing them is only necessary when adopting
+a newer source vocabulary. Existing formats and interpreter operations remain
+supported through their original interfaces.
+
+The named-record loader `wire_info_open()` specifically accepts revision-4
+images; earlier images keep their existing loading and caller-data interfaces.
+This interface distinction does not deprecate revisions 1–3. See the
+[compatibility policy](doc/VERSIONING.md#compatibility-policy) for the C/Rust
+support boundaries and the distinction between feature support and binary ABI.
 
 ### Protocol and message objects
 
@@ -616,7 +643,7 @@ supplies the reserved zero. The third caller value becomes `%p{3}%w` in the
 encoder, while the decoder reads and stores that field and checks the constant.
 Authors describe this layout once; `wfc` produces both programs.
 
-### Version 1: fields, constants and layout
+### Source format 1: fields, constants and layout
 
 Every field has `name` and `type`, with the following additional properties:
 
@@ -643,7 +670,7 @@ caller-supplied `bits` value may be at most 63 bits because its generated
 arithmetic uses the signed stack. Use an aligned `u64` for a full-width caller
 value; constants can use all 64 bits.
 
-### Version 2: a variable byte tail
+### Source format 2: a variable byte tail
 
 Set `wire_format` to 2 to allow a final `bytes` field:
 
@@ -660,7 +687,7 @@ remaining input into that slice slot. The caller must bound the input to the
 message being decoded. The generated wire size is the fixed-prefix/minimum
 size, with a separate flag indicating variable size.
 
-### Version 3: lengths, nested records and alternatives
+### Source format 3: lengths, nested records and alternatives
 
 Set `wire_format` to 3 to add the following declarations. Earlier scalar,
 constant and layout rules still apply.
@@ -721,7 +748,7 @@ caller supplies a one-record list for the selected child. An unmatched value
 selects no child; the application must enforce a closed selector set if its
 protocol requires one. Choice policy is not inferred from message names.
 
-### Version 4: named fields and expressions
+### Source format 4: named fields and expressions
 
 Version 4 uses `wire_info_record_t` values in field order. It retains a slot
 for every field, including constants and computed values. A numeric field uses
@@ -1215,6 +1242,7 @@ are available with `WireFormat::faults()` after a parse.
 | `rust/wfc/` | independent Rust JSON5 checker and `.wi` compiler |
 | `rust/wfc/tests/wfc_cli.rs` | Rust `wfc` command-line and `.incbin` integration tests |
 | `tests/wfc_conformance.sh` | C/Rust byte-for-byte compiler conformance test |
+| `doc/VERSIONING.md` | Library/file/ABI version distinctions, feature history and compatibility policy |
 | `doc/WF_FILE_FORMAT.md` | normative `.wf` source-format definition |
 | `doc/WF_FILE_FORMAT_V2.md` | compatible variable-tail extension |
 | `doc/WF_FILE_FORMAT_V3.md` | SDNV, bounded-slice, record, and choice extension |
