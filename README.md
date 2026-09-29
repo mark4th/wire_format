@@ -81,7 +81,7 @@ read a 16-bit value into variable `a`, then a byte into `b`.
 
 ### Parameters
 
-The caller supplies an array of `int64_t` parameters before parsing.
+The application supplies numbered integer parameters before parsing.
 Format string `%p1` pushes parameter 1 onto the stack, `%p2` pushes
 parameter 2, and so on.  The compact spelling exists for parameters 1
 through 9.  Braces address the complete parameter array:
@@ -114,7 +114,7 @@ braced index is rejected instead of indexing outside the parameter array.
 | `%V`      | pop slice slot, then byte count; verify length and emit the slice |
 | `%k`      | push the count of the popped record-list slot |
 | `%J[n]`   | pop child field count, list slot, record count; process message *n* per row |
-| `%[n]`    | call format *n* of the table set by `wi_set_formats()` |
+| `%[n]`    | call format *n* of the shared format table |
 | `%:`      | pop a repeat count for the next `%[n]` |
 
 ### Arithmetic and logic
@@ -126,179 +126,117 @@ braced index is rejected instead of indexing outside the parameter array.
 | `%A` `%O` `%!`           | logical AND/OR/NOT |
 | `%=` `%>` `%<`           | comparisons (push 0 or 1) |
 
-### Message nesting — the format string call
+### Message nesting — shared format strings
 
-`%[n]` embeds format string *n* of a caller-supplied table into the format
-being parsed.  It is a subroutine call: the rest of the current string is
-pushed, parsing continues inside the called one, and running off the end
-of it returns to where the call was made.
+A format table gives each reusable string a numeric index. `%[n]` means
+"process the string at index n, then continue here." A message can therefore
+reference a shared substring wherever it needs the same layout.
 
-```c
-static const char f_coord[] = "%p1%w%p2%w";      // a reusable sub-message
-static const char *table[]  = { f_coord };
+Consider a coordinate pair used in two messages:
 
-wi_init(&v, buf, sizeof buf, params, 2);
-wi_set_formats(&v, table, 1);                    // ⚠ AFTER wi_init
-wi_parse(&v, "%{170}%c%[0]%{187}%c");            // AA <coord> BB
+| Index | Purpose | Format string |
+|---|---|---|
+| 0 | Shared coordinate pair | `%p1%w%p2%w` |
+| 1 | Coordinate pair between markers AA and BB | `%{170}%b%[0]%{187}%b` |
+| 2 | Coordinate pair between markers CC and DD | `%{204}%b%[0]%{221}%b` |
+
+With parameters `0x1122` and `0x3344`, the strings produce:
+
+```text
+Format 0:       11 22 33 44
+Format 1: AA    11 22 33 44    BB
+Format 2: CC    11 22 33 44    DD
 ```
 
-A message that contains another message is written once and referenced,
-rather than copied into every format string that needs it.
+In format 1, `%{170}%b` writes AA. `%[0]` processes the coordinate string,
+writing the two 16-bit values. Reaching the end of that shared string returns
+to format 1, where `%{187}%b` writes BB. Format 2 references exactly the same
+coordinate definition. Changing entry 0 changes the shared layout in both.
 
-⚠ `wi_set_formats()` must be called **after** `wi_init()` or
-`wi_decode_init()` — both `memset` the whole struct, so setting the table
-first silently loses it.
+The same mechanism works for decoding. A shared decode string `%S%Pa%S%Pb`
+reads two 16-bit values and stores them in variables `a` and `b`. A parent
+format can read its header, call that string, and continue reading its trailer.
 
-⚠ The called format shares the caller's parameters and its `a`–`z`
-variables.  Sharing parameters is deliberate: a sub-format reads the same
-array.  On **decode** it means a callee storing into `%Pa` overwrites the
-caller's `a` — give parent and child disjoint letters, or read the
-child's values out before calling again.
+An ordinary `%[n]` call shares the current parameters, value stack and
+variables. A value stored by the child remains available after it returns;
+using the same variable again replaces that value. Give different fields
+different variables when their decoded values must be retained together.
 
-#### Arrays — `%rN`
+#### Repeating a shared string — `%:`
 
-`%rN` emits a count of elements from a buffer, big-endian like `%w` and
-`%W`:
+`%:` pops a repeat count and applies it to the next `%[n]` call:
 
-```c
-"%p1%p2%r1"    // p1 = pointer, p2 = count.  bytes
-"%p1%p2%r2"    // ...uint16 array
-"%p1%p2%r4"    // ...uint32 array
-```
+| Format string | Effect |
+|---|---|
+| `%{3}%:%[0]` | Process entry 0 three times |
+| `%p1%:%[0]` | Use parameter 1 as the repeat count |
+| `%{2}%{3}%*%:%[0]` | Calculate the repeat count: 2 × 3 |
+| `%{0}%:%[0]` | Skip the call |
 
-Bare `%r` remains an alias for `%r1`, preserving existing byte-buffer
-formats. When a digit follows `%r`, it is an element size and must be 1,
-2, or 4; any other size sets `overrun`.
+With the coordinate parameters above, the first string produces
+`11 22 33 44 11 22 33 44 11 22 33 44`. Each repetition uses the same
+parameters. Repetition does not advance to another set of field values.
 
-The multi-byte forms read native `uint16_t` or `uint32_t` elements and emit
-their values in big-endian order exactly as `%w` or `%W` does for one value.
-This produces the same wire representation on little- and big-endian hosts.
-
-★ **This is also why `%:` cannot walk an array.** A repeat runs a format
-again with the *same* parameters, so it emits one element N times.
-Walking is a property of the emitter, not of the loop — which is why the
-two are separate specifiers rather than one.
-
----
-
-#### Repeating a call — `%:`
-
-`%:` pops a repeat count off the RPN stack and applies it to the next
-`%[n]`:
-
-```c
-"%{3}%:%[0]"          // call format 0 three times
-"%p1%:%[0]"           // ...as many times as the caller passed
-"%{2}%{3}%*%:%[0]"    // ...computed
-```
-
-Taking the count from the stack rather than baking a digit into the
-string means it is not limited to a single digit, and it can be computed
-from parameters or arithmetic.
-
-⚠ **`%:` repeats something constant.** The parameters do not advance
-between iterations. Use `%rN` for an array of scalar values and `%J[n]`
-for distinct child records, described below.
-
-**Zero works.**  `%{0}%:%[0]` does not call at all — the count is known
-*before* the call rather than after, which a count placed at the end of a
-loop body could never manage; that shape can only give do-while.
-
-`%:` arms the *next* `%[n]`, not merely an adjacent one, so a count can
-be computed, a header emitted, and then the call made.  Every `%[n]`
-consumes it — **including one that is refused** — so a single `%:` arms
-exactly one call and a stray one cannot leak into a later.
-
-A repeated call still checks input/output bounds. It does not advance caller
-parameters or preserve separate decoded values for each iteration. The DNS
-adapter uses a C loop because each answer includes a compressed variable-length
-name that it handles outside the fixed-field format.
+The count applies to the next call even if other operations occur between
+`%:` and `%[n]`. That call consumes the count; subsequent calls run once
+unless another `%:` supplies a new count. Reads and writes remain bounded
+on every repetition.
 
 #### Distinct child records — `%J[n]`
 
-`%J[n]` applies table entry `n` to each row of a caller-owned record list.
-Each child receives its own scalar values, byte slices and nested lists. This
-supports arrays of different records on both encode and decode without
-writing a C loop for each message type.
+A list of different coordinate pairs needs a fresh set of field values for
+each child. `%J[n]` applies shared string `n` once per record, with each
+record's own values, byte slices and nested lists.
 
-For the parameter-based interface, attach a `wi_record_list_t` with
-`wi_set_record_list()`. Push the record count, list slot and child field count,
-in that order, before `%J[n]`. The list specifies its allocated capacity;
-decode fails if the requested count exceeds it. Child references still point
-to earlier table entries.
+The numbered-slot form takes three stack operands: record count, list slot,
+then child field count. For example:
 
-The named-record interface uses `%J[n]{field-name}` and a `wire_info_record_t`
-for each child. Its operands are record count and terminator, with the
-terminator on top of the same RPN stack. The compiler generates these calls
-from nested field descriptions in the source-format section below.
-
-Unlike `%[n]`, which shares the caller's variables, a record call has a child
-context. Named child fields can also read enclosing-record values. This lets
-one child layout be reused without copying it into every parent.
-
----
-
-#### Nesting depth
-
-`WI_CALL_DEPTH` (default 8) bounds the call stack, and is meant to be
-set for the protocol using it — `-DWI_CALL_DEPTH=n`.  The right value is
-how deep your own message table nests, which `wi_set_formats()` measures
-and enforces; the default is a starting point, not a limit the library
-can know for you. Each frame stores the return position, called string,
-caller index and repeat counter; its byte size depends on the target ABI.
-Compile the library and its callers with matching limit definitions.
-
-★ **This is not the table size.**  An N-entry table *can* nest N deep,
-since every call strictly decreases the index — but almost none do, and
-refusing a forty-message protocol because it theoretically could would be
-wrong.  `wi_set_formats()` therefore measures the table's actual depth
-and refuses only a table that really would overflow the stack:
-
-```
-depth[k] = 1 + max(depth[j]) for every %[j] or %J[j] in format k
+```text
+%{2}%{0}%{2}%J[0]
 ```
 
-The ordering rule makes that a single pass upward from index 0 — the
-table is a DAG that is already topologically sorted, so there is no
-recursion and no cycle check to write.  A flat table of forty formats
-measures depth 1 and is accepted.
+This processes two records from list slot 0, each containing two fields,
+using format 0. If their coordinates are `(0x1122, 0x3344)` and
+`(0x5566, 0x7788)`, the output is `11 22 33 44 55 66 77 88`.
 
----
+The named form, `%J[n]{field-name}`, selects a list by field name. Its stack
+operands are the record count followed by a terminator value; 256 represents
+end of input rather than a delimiter byte. A finite count processes exactly
+that many records. Each child has its own context, and named fields may also
+refer to enclosing records. The later source-format section describes how
+to declare these lists and generate the corresponding strings.
 
-#### No forward references
+#### Reference order and nesting depth
 
-**A format may only call a format with a strictly lower index.**
+A table entry may reference only entries with a **lower index**. Put shared
+pieces first and the messages that compose them afterward. In the table above,
+entries 1 and 2 can call entry 0. Entry 0 cannot call either parent, and no
+entry can call itself. Every permitted call moves toward a lower index, so
+self-recursion and cycles cannot execute.
 
-That single rule is what makes recursion impossible.  Every call
-decreases the index, and the index cannot go below zero, so a permitted call
-chain always terminates. Self-references and cycles cannot execute.
+Nesting depth measures the longest chain of calls, not the number of entries.
+The coordinate table has depth two: a parent calls the coordinate substring.
+Adding entry 3 with `%[1]%[2]` gives depth three: entry 3 calls a parent, which
+calls the coordinate substring. Adding many independent parent formats would
+leave the depth at two. The runtime checks this depth against its configured
+limit before using the table.
 
-It covers the case that is invisible in any single format string, a cycle
-that exists only in the table:
+### Arrays of scalar values — `%rN`
 
-```c
-// neither of these looks wrong on its own
-static const char f_ping[] = "%{2}%c%[5]";   // index 4 calls 5  ← refused
-static const char f_pong[] = "%{3}%c%[4]";   // index 5 calls 4  ← fine
-```
+`%rN` reads successive elements from a supplied buffer and writes their values:
 
-And it covers self-reference for free — `%[3]` inside format 3 is a cycle
-of length one, which is why the comparison is *strictly* less rather than
-"not greater".
+| Format string | Parameters | Output |
+|---|---|---|
+| `%p1%p2%r1` | Buffer address, byte count | Raw bytes |
+| `%p1%p2%r2` | Buffer address, 16-bit element count | Two big-endian bytes per element |
+| `%p1%p2%r4` | Buffer address, 32-bit element count | Four big-endian bytes per element |
 
-The string passed to `wi_parse()` is not in the table and ranks above all
-of it, so a top-level message may call anything.
+Bare `%r` is equivalent to `%r1`. The element size must be 1, 2 or 4.
+The multi-byte forms interpret the supplied elements in the host's native
+order and emit them in big-endian order, like `%w` or `%W`.
 
-`WI_CALL_DEPTH` remains a separate resource bound. Acyclic calls terminate,
-but a long acyclic chain can still exceed the configured depth.
-
-Direct `%[n]` calls skip an invalid index, forward/self reference, `NULL`
-entry or missing table. Exceeding the return-stack capacity sets `overrun`
-and stops parsing. Check the return value of `wi_set_formats()` before parsing;
-it accounts for the extra top-level frame. The source compiler rejects
-forward/self child references before generating the table.
-
----
+Use `%rN` to walk scalar values, `%J[n]` to walk distinct child records, and
+`%:` to repeat a shared string with unchanged parameters.
 
 ### Literals
 
@@ -322,45 +260,13 @@ The `%e` else clause is optional.
 
 ### Faults
 
-`%E` pops a 32-bit fault mask, ORs it into the parser's `faults` field, and
-continues unless that mask intersects the caller-supplied `abort_mask`. This
-keeps validation policy outside the format string: one caller can treat a fault
-as diagnostic information while another can stop parsing immediately.
+`%E` pops a fault-bit mask from the stack and records it. A format can use a
+conditional to raise a fault when a field is invalid, for example
+`%{1}%E` for the first fault bit. Application policy determines which faults
+stop parsing immediately and which are retained for inspection afterward.
 
-Fault names are application-level constants. A frontend can associate a name
-with a numeric mask and emit an operation such as `%{1}%E`.
-
-```c
-#define FAULT_BAD_MAGIC  (1u << 0)
-
-wi_decode_init(&v, frame, frame_len, NULL, 0);
-v.abort_mask = FAULT_BAD_MAGIC;
-wi_parse(&v, frame_header_format);
-if (v.faults & FAULT_BAD_MAGIC) {
-    /* reject frame */
-}
-```
-
-`faults` resets at the start of each `wi_parse()` call. `abort_mask` is caller
-policy and is left unchanged.
-
----
-
-## Buffer overruns
-
-Reads and writes are bounds-checked and set `v.overrun`, which stops the
-parse.
-
-The return value of `wi_parse()` is the length produced, which for a
-truncated encode is a short but entirely plausible number — **check `v.overrun`
-before using the result.** Stack bounds and malformed operations can also set
-this flag. Check `v.faults` separately for format-raised validation faults.
-
-```c
-wi_init(&v, buf, sizeof buf, params, n);
-len = wi_parse(&v, fmt);
-if (v.overrun) { /* encoding failed - do not transmit partial bytes */ }
-```
+Fault-bit meanings belong to the application. The public API section below
+explains how to select an abort policy and inspect the result.
 
 ---
 
@@ -380,35 +286,20 @@ and push them onto the stack rather than popping bytes and writing them out.
 | `%L`      | read 4 bytes big-endian → push as uint32 |
 | `%Q`      | read 8 bytes big-endian → push as uint64 |
 
-Results are captured into named variables with `%Pa`, `%Pb`, ... and read
-back from `wi_vars_t.vars[]` after parsing.
+Results are captured into variables with `%Pa`, `%Pb`, and so on, and made
+available to the application after parsing.
 
 #### 64-bit values and the signed stack
 
 `%q` and `%Q` move all eight bytes exactly, in both directions — a value
 written with `%q` and read back with `%Q` is bit-identical.
 
-⚠ The value stack is `int64_t`, so a `uint64_t` above `INT64_MAX` is
-carried as a *negative* `int64_t`. That costs nothing when the value is
-only being moved: cast `wi_vars_t.vars[]` back to `uint64_t` at the call
-site and the bytes are right. It matters only if a format *compares* such
-a value in place with `%>`, `%<` or `%=`, which compare signed.
-
-The C named-record operations include unsigned `%u` arithmetic/comparisons
-for full-width values. The source compiler uses those for version 4 expressions;
-the original arithmetic operators retain their signed interpretation.
-
-### Initialisation
-
-```c
-wi_decode_init(&v, buf, buflen, NULL, 0);
-wi_parse(&v, format_string);
-```
-
-`v.in_pos` advances as bytes are consumed.  Multiple `wi_parse()` calls on
-the same `wi_vars_t` continue from where the previous call left off, so
-header and body sections can be decoded in sequence without
-re-initialising.
+The original stack operations interpret values as signed 64-bit integers.
+Moving all 64 bits through `%q` and `%Q` preserves them, but `%>` and `%<`
+compare them as signed values. Use the unsigned `%u` operations when a
+calculation or comparison must treat the high bit as part of a positive
+unsigned value. The version 4 compiler uses those unsigned operations for
+its expressions.
 
 ---
 
@@ -453,7 +344,7 @@ const char wi_ip_first_byte_dec[] =
     "%f";              // advance past the byte
 ```
 
-After parsing, `v.vars[0]` holds the version and `v.vars[1]` holds IHL.
+After parsing, variable `a` holds the version and variable `b` holds IHL.
 
 ### Notes
 
@@ -470,6 +361,139 @@ The C interpreter also has sequential `%i`/`%j` bit operations for named
 records. They consume a width of 0–64 and advance through packed bits without
 requiring per-byte positions. These are the operations generated for version 4
 `uint` fields.
+
+## Public C API
+
+The functions declared in [`wire_format.h`](wire_format.h) and
+[`wire_info.h`](wire_info.h) are application-facing interfaces. The first
+executes format strings directly; the second loads compiled named-record
+tables and uses the same interpreter. Applications do not call the parser's
+internal operation handlers.
+
+### Executing format strings directly
+
+A caller-owned `wi_vars_t` holds the current buffer positions, parameters,
+variables and parser status. Initialize it for the direction you need, attach
+any shared formats or data, then execute a string:
+
+| Function | Application responsibility and result |
+|---|---|
+| `wi_init(&state, output, capacity, params, count)` | Initialize encoding with an output buffer and optional `int64_t` parameters |
+| `wi_decode_init(&state, input, length, params, count)` | Initialize decoding with the received bytes and optional parameters |
+| `wi_set_formats(&state, formats, count)` | Attach the table referenced by `%[n]` and `%J[n]`; returns 0 on success or -1 for invalid table size/depth |
+| `wi_set_slice(&state, slot, bytes, length)` | Attach a byte slice for `%v`, `%V`, `%z`, `%N` and `%R`; returns 0 or -1 |
+| `wi_set_record_list(&state, slot, &list)` | Attach a bounded record list for numbered `%J[n]`; returns 0 or -1 |
+| `wi_parse(&state, format)` | Execute a format string; returns the number of bytes emitted |
+
+Call the attachment functions **after initialization**, because initialization
+clears the context. `%p1` addresses the first parameter, while slice and list
+slots are zero-based. The table and attached buffers must remain valid during
+parsing. Parameters are copied into the context; table entries and byte slices
+are borrowed.
+
+The following complete example uses the shared coordinate format introduced
+above, then decodes the resulting message:
+
+```c
+#include "wire_format.h"
+
+int main(void)
+{
+    const char *encode_formats[] = {
+        "%p1%w%p2%w",
+        "%{170}%b%[0]%{187}%b"
+    };
+    const char *decode_formats[] = {
+        "%S%Pa%S%Pb",
+        "%B%Pc%[0]%B%Pd"
+    };
+    int64_t params[] = {0x1122, 0x3344};
+    uint8_t bytes[6];
+    wi_vars_t state;
+
+    wi_init(&state, bytes, sizeof(bytes), params, 2);
+    if (wi_set_formats(&state, encode_formats, 2) != 0)
+    {
+        return 1;
+    }
+    size_t used = wi_parse(&state, "%[1]");
+    if (state.overrun || state.faults || used != sizeof(bytes))
+    {
+        return 1;
+    }
+
+    wi_decode_init(&state, bytes, used, NULL, 0);
+    if (wi_set_formats(&state, decode_formats, 2) != 0)
+    {
+        return 1;
+    }
+    wi_parse(&state, "%[1]");
+    return state.overrun || state.faults || state.in_pos != used ||
+           state.vars[0] != 0x1122 || state.vars[1] != 0x3344 ||
+           state.vars[2] != 0xAA || state.vars[3] != 0xBB;
+}
+```
+
+Compile it against `wire_format.c`, or link the reusable library described
+below. On decode, `state.in_pos` reports consumed bytes and `state.vars[0]`
+through `[25]` correspond to variables `a` through `z`. The return value of
+`wi_parse()` is the emitted length, so it is not the decode-consumption count.
+Successive decode calls on the same context continue at `in_pos`; initialize
+again when starting an independent input buffer.
+
+For distinct child records, `wi_record_list_t` supplies a `records` array,
+`capacity`, `field_count` and an encode `count`. Each `wi_record_t` row holds
+its scalar `values`, byte `slices` and child `lists` at field ordinals. Decode
+sets the resulting count and checks it against capacity. This is the storage
+interface behind the numbered `%J[n]` form.
+
+### Errors, fault policy and limits
+
+Always check `state.overrun` after parsing. Buffer exhaustion, stack bounds
+and malformed operations stop execution with that flag set; a short emitted
+length alone does not distinguish success from partial output. Discard partial
+output on error.
+
+`%E` records fault bits in `state.faults`. Set `state.abort_mask` after
+initialization to choose which faults stop parsing immediately; inspect
+`state.faults` afterward to apply the application's validation policy.
+Fault bits reset for each parse, while the abort mask is retained.
+
+An ordinary `%[n]` call skips invalid indices, missing entries and forward/self
+references. Return-stack exhaustion sets `overrun`. The outer string supplied
+to `wi_parse()` is separate from the table and can call any table entry;
+references within those entries must still point backward.
+
+`wi_set_formats()` checks actual call depth, including the extra outer frame.
+`WI_CALL_DEPTH` defaults to 8 and `WI_MAX_FORMATS` to 64. They are build-time
+limits; if overriding them, compile the library and callers with matching
+settings. The current C value stack holds 64 entries, the parameter array
+holds 16, and there are 26 letter variables.
+
+### Using compiled named-record tables
+
+`wire_info.h` provides a higher-level public interface for compiled tables
+with named fields. It currently accepts version 4 `.wi` images, introduced
+in the source-format section next. It still executes their format strings
+through `wi_parse()`.
+
+| Function | Purpose |
+|---|---|
+| `wire_info_open()` | Validate a compiled image already supplied in memory and create a borrowed view |
+| `wire_info_find()`, `wire_info_field()` | Find message and field indices by name; return -1 when absent |
+| `wire_info_message_name()`, `wire_info_field_count()`, `wire_info_field_name()`, `wire_info_field_type()`, `wire_info_child()` | Inspect message/field metadata and child layouts |
+| `wire_info_format()` | Obtain the selected encode or decode format string |
+| `wire_info_encode()`, `wire_info_decode()` | Bind a caller-owned record and execute the chosen format |
+| `wire_info_error()` | Convert a returned status to a readable description |
+
+`wire_info_record_t` points to an array of `wire_info_value_t` fields and its
+capacity. Values hold numbers, borrowed byte slices or bounded child-record
+lists. Keep the image and record storage alive while using them; decoded byte
+slices also require the input buffer to remain alive. Encode/decode return a
+status and report bytes emitted/consumed through `used`. Errors set `used` to
+zero, but records and output may already be partially modified.
+
+---
 
 ## Human-readable definitions: `.wf` to `.wi`
 
