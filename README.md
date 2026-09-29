@@ -37,19 +37,47 @@ to send a message and how to manage transport, sessions and protocol behavior.
 
 ## How it works
 
+The application chooses a format string and supplies a buffer. For encoding,
+it also supplies the field values to write; for decoding, the buffer contains
+the received bytes. The interpreter reads the format string from left to
+right, executing each `%` specifier as an operation. Operations can obtain a
+caller value, perform a calculation, read or write bytes, or call another
+format in the table.
+
+These operations pass integer values to one another through a stack. This
+lets a format describe both the layout of a message and calculations such as
+deriving a length or combining several fields into one byte.
+
 ### The RPN stack
+
+RPN (reverse Polish notation), also called postfix notation, puts an operator
+after its operands. Instead of writing `(2 + 3) * 4`, write:
+
+```text
+2 3 + 4 *
+```
+
+The interpreter reads this from left to right. It pushes 2 and 3 onto the
+stack. The `+` operation pops those values and pushes their sum, 5. It then
+pushes 4, and `*` pops 5 and 4 and pushes 20. A push adds a value to the top
+of the stack; a pop removes the most recently pushed value.
+
+The instruction order already specifies the calculation order. The runtime
+does not need to resolve operator precedence, match arithmetic parentheses,
+or build an expression tree before evaluating it. Each operation executes as
+it is read, using the stack to hold intermediate values. This keeps the
+interpreter small and lets it use a fixed-size stack without allocating
+memory for expressions.
+
+wire_format uses this same mechanism for both arithmetic and byte operations.
+To write a field, one operation pushes its value and a later operation pops
+that value and emits the required bytes. Decode operations push values read
+from the input so subsequent operations can store or check them.
 
 For example, `%p1%w%p2%b` pushes parameter 1 and writes it as a big-endian
 16-bit value, then pushes parameter 2 and writes one byte. Inputs `0x1234`
 and `0x56` produce `12 34 56`. The corresponding decoder is `%S%Pa%B%Pb`:
 read a 16-bit value into variable `a`, then a byte into `b`.
-
-
-wire_format uses a small integer stack (RPN, reverse Polish notation — the
-same model as Forth and the original terminfo).  Format strings push values,
-manipulate them, and then emit bytes.  This avoids the need for a
-recursive-descent expression parser while still supporting arithmetic,
-bitwise logic, and conditional branching.
 
 ### Parameters
 
