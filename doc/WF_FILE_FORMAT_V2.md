@@ -3,8 +3,8 @@
 This is **source-format revision 2**, not library release 2. Its C and Rust
 support was added in development commit
 [`bf6fc14`](https://github.com/mark4th/wire_format/commit/bf6fc14)
-(2026-09-23), with no separate tagged library release. It remains supported;
-see [versioning and feature history](VERSIONING.md).
+(2026-09-23). **First included in tagged library release 0.1.0 (C and Rust).**
+It remains supported; see [versioning and feature history](VERSIONING.md).
 
 Version 2 is a compatible extension of version 1 for records with a
 variable-length final byte field. All version-1 scalar, bit-field, constant,

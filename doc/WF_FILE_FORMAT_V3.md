@@ -3,8 +3,9 @@
 This is **source-format revision 3**, not library release 3. Its C and Rust
 support was added in development commit
 [`92f5533`](https://github.com/mark4th/wire_format/commit/92f5533)
-(2026-09-29), with no separate tagged library release. It retains support for
-the earlier features; see [versioning and feature history](VERSIONING.md).
+(2026-09-29). **First included in tagged library release 0.1.0 (C and Rust).**
+It retains support for the earlier features; see
+[versioning and feature history](VERSIONING.md).
 
 Version 3 adds bounded variable fields and structured variable repetition to
 the version-2 format. All earlier scalar, bit-field, constant, identifier,

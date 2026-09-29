@@ -3,8 +3,8 @@
 This guide describes **source/compiled-format revision 4**, not library
 release 4. Its C support was added in development commit
 [`92f5533`](https://github.com/mark4th/wire_format/commit/92f5533)
-(2026-09-29), with no separate tagged library release. Rust support has not
-been implemented. Earlier C features remain supported through their existing
+(2026-09-29). **First included in tagged library release 0.1.0 (C).** Rust
+support has not been implemented. Earlier C features remain supported through their existing
 interfaces; see [versioning and feature history](VERSIONING.md).
 
 The C `wfc` compiler reads `.wf` sources (JSON5) and writes `.wi` files

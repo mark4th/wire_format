@@ -10,12 +10,16 @@
 | Shared-library ABI | `.4` in `libwire_info.so.4` | The C binary interface used when linking applications |
 | Protocol version | A field in the protocol being described, if it has one | The network protocol's own version, independent of all the above |
 
-The current C compiler and Rust package manifests report **0.1.0**. The
-repository has no release tags establishing separate library releases for
-the additions below. In particular, source format 4 does **not** mean library
-release 4.0, and the shared-library SONAME is not a release number either.
-Use a commit identifier to distinguish current development snapshots that
-report the same 0.1.0 version.
+The current library/tool release is **0.1.0**, identified by the annotated
+Git tag [`v0.1.0`](https://github.com/mark4th/wire_format/tree/v0.1.0).
+The C compiler and Rust package versions agree with that tag. This is the
+first tagged release; it includes all features listed below. Earlier untagged
+development snapshots also reported 0.1.0, so use the tag or a commit identifier
+when selecting an exact implementation.
+
+Source format 4 does **not** mean library release 4.0, and the shared-library
+SONAME is not a release number either. See the [release notes](../CHANGELOG.md)
+for the contents and limitations of each release.
 
 The current compilers emit a `.wi` revision matching the selected `.wf`
 revision. These numbers describe the files; they do not require a matching
@@ -60,9 +64,10 @@ separately. Historical feature entries remain in this document after removal.
 
 ## What each source/compiled revision added
 
-The implementation column records commits, **not numbered library releases**.
-All rows are present in today's 0.1.0 development tree; that version string
-alone cannot establish whether an older checkout contains a particular feature.
+**First included in tagged library release 0.1.0:** every row below, for the
+implementations listed in the support column. The implementation column
+separately records when the code was first committed. No earlier release
+numbers have been assigned retroactively to development snapshots.
 
 | Revision | Additions | First implementation in repository history | Current support |
 |---|---|---|---|
@@ -81,6 +86,10 @@ Source revisions describe what the compiler can express. They are not the
 chronology of every interpreter operation: shared subformats, repeated calls
 and 64-bit operations already existed before the `.wf` compiler.
 
+All features in this table were **first included in tagged library release
+0.1.0**, in the implementations shown. Their original C implementation commits
+remain useful when examining pre-release development history.
+
 | Feature | First C implementation | Current support |
 |---|---|---|
 | Stack-based encoding, parameters, variables, calculations and conditionals | [5cc225a](https://github.com/mark4th/wire_format/commit/5cc225a), 2026-05-26 | C and Rust |
@@ -97,7 +106,18 @@ with parity for the then-existing C operations completed in
 [3550727](https://github.com/mark4th/wire_format/commit/3550727) that day.
 Later source-revision additions are listed separately above.
 
-## Recording future releases
+## Release tags and future releases
+
+Use annotated tags named `vMAJOR.MINOR.PATCH`. Published tags identify immutable
+release snapshots: do not move or overwrite them. Commit release notes and
+version updates before tagging, so a checkout of the tag is self-describing.
+
+Use patch increments for compatible fixes and documentation corrections, and
+minor increments for compatible feature additions. Record any incompatible
+change and migration instructions explicitly; it must not be hidden in a
+patch release. Before 1.0, any necessary breaking change requires a minor
+increment; from 1.0 onward it requires a major increment. The compatibility
+and deprecation policy above still applies during 0.x development.
 
 For each feature, record both the source/compiled revision it needs, if any,
 and the first library release that contains its implementation. Once a release
@@ -106,6 +126,22 @@ separate C/Rust entries if their availability differs. Until then, label the
 entry as development work and identify its commit; do not infer a release
 number from a file-format revision.
 
-When publishing a release, update the package/tool versions and this history,
-and tag the corresponding commit. Keep earlier feature and compatibility
-entries so users can determine the minimum implementation they need.
+When publishing a release:
+
+1. Update the C compiler version in `compiler/main.c`, both Rust package
+   versions in `rust/Cargo.toml` and `rust/wfc/Cargo.toml`, and their entries
+   in `Cargo.lock`. Keep them consistent with the intended tag.
+2. Update `CHANGELOG.md`, this feature history and any affected feature guides.
+   Keep earlier feature and compatibility entries.
+3. Run `make -j4 test` and `cargo test --workspace`; resolve failures before
+   committing the release changes.
+4. Create an annotated tag on that commit, then push the commit and that
+   specific tag together. For example, for a future 0.1.1 release:
+
+   ```sh
+   git tag -a v0.1.1 -m 'wire_format 0.1.1: describe the release changes'
+   git push --atomic origin master refs/tags/v0.1.1
+   ```
+
+File-format revisions and the shared-library SONAME change only when their
+respective formats or ABI require it, not on every library release.

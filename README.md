@@ -550,14 +550,13 @@ version 4. The Rust compiler and interpreter currently support versions 1–3.
 
 #### Library availability and backward compatibility
 
-The repository has no release tags establishing distinct library releases for
-these additions. The source-format 1 C/Rust compilers were implemented on
-2026-09-22; the current `.wi` container and source-format 2 followed on
-2026-09-23; source formats 3 and 4 were implemented on 2026-09-29. These are
-development-history dates, not library release numbers. The
-[feature history](doc/VERSIONING.md) identifies the implementation commits,
-including the earlier additions to the format-string interpreter. Future
-releases will record “Added in library X.Y.Z” for each new feature.
+All features above were **first included in tagged library release 0.1.0**
+([`v0.1.0`](https://github.com/mark4th/wire_format/tree/v0.1.0)), with C support
+for revisions 1–4 and Rust support for revisions 1–3. Earlier untagged snapshots
+also reported `0.1.0`; the tag identifies the release baseline precisely.
+The [release notes](CHANGELOG.md) summarize that baseline, and the
+[feature history](doc/VERSIONING.md) records the earlier implementation commits.
+Future releases will record “Added in library X.Y.Z” for each new feature.
 
 New library versions must continue supporting earlier documented features
 unless an explicit deprecation is documented. None of the documented
@@ -1243,6 +1242,7 @@ are available with `WireFormat::faults()` after a parse.
 | `rust/wfc/tests/wfc_cli.rs` | Rust `wfc` command-line and `.incbin` integration tests |
 | `tests/wfc_conformance.sh` | C/Rust byte-for-byte compiler conformance test |
 | `doc/VERSIONING.md` | Library/file/ABI version distinctions, feature history and compatibility policy |
+| `CHANGELOG.md` | Tagged releases, changes and support boundaries |
 | `doc/WF_FILE_FORMAT.md` | normative `.wf` source-format definition |
 | `doc/WF_FILE_FORMAT_V2.md` | compatible variable-tail extension |
 | `doc/WF_FILE_FORMAT_V3.md` | SDNV, bounded-slice, record, and choice extension |
