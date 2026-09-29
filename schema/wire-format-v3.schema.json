@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wire-format.invalid/schema/wire-format-v3.schema.json",
+  "title": "wire_format protocol source version 3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wire_format", "protocol"],
+  "properties": {
+    "wire_format": { "const": 3 },
+    "protocol": { "$ref": "#/$defs/protocol" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "unsigned64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "octets": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "byte_order", "bit_order", "messages"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "description": { "$ref": "#/$defs/text" },
+        "standard": { "$ref": "#/$defs/text" },
+        "reference": { "$ref": "#/$defs/text" },
+        "byte_order": { "enum": ["big-endian", "little-endian"] },
+        "bit_order": { "enum": ["msb-first", "lsb-first"] },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/message" }
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "fields"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "description": { "$ref": "#/$defs/text" },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/field" }
+        },
+        "vectors": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/vector" }
+        }
+      }
+    },
+    "field": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "type", "width"],
+          "properties": {
+            "name": { "$ref": "#/$defs/identifier" },
+            "type": { "const": "bits" },
+            "width": { "type": "integer", "minimum": 1, "maximum": 64 },
+            "constant": { "$ref": "#/$defs/unsigned64" },
+            "count_of": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "type"],
+          "properties": {
+            "name": { "$ref": "#/$defs/identifier" },
+            "type": { "enum": ["u8", "u16", "u32", "u64", "sdnv"] },
+            "constant": { "$ref": "#/$defs/unsigned64" },
+            "length_of": { "$ref": "#/$defs/identifier" },
+            "count_of": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "type"],
+          "properties": {
+            "name": { "$ref": "#/$defs/identifier" },
+            "type": { "const": "bytes" },
+            "length_from": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "type", "message", "count_from"],
+          "properties": {
+            "name": { "$ref": "#/$defs/identifier" },
+            "type": { "const": "records" },
+            "message": { "$ref": "#/$defs/identifier" },
+            "count_from": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "type", "select_from", "cases"],
+          "properties": {
+            "name": { "$ref": "#/$defs/identifier" },
+            "type": { "const": "choice" },
+            "select_from": { "$ref": "#/$defs/identifier" },
+            "cases": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["value", "message"],
+                "properties": {
+                  "value": { "$ref": "#/$defs/unsigned64" },
+                  "message": { "$ref": "#/$defs/identifier" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "values", "wire"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "values": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": {
+            "oneOf": [
+              { "$ref": "#/$defs/unsigned64" },
+              { "$ref": "#/$defs/octets" }
+            ]
+          }
+        },
+        "wire": {
+          "allOf": [
+            { "$ref": "#/$defs/octets" },
+            { "minItems": 1 }
+          ]
+        }
+      }
+    }
+  }
+}

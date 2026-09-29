@@ -20,6 +20,12 @@
 
 #include "wire_format.h"
 
+static void record_get(wi_vars_t *);
+static void record_put(wi_vars_t *);
+static void record_length(wi_vars_t *, int);
+static void record_slice(wi_vars_t *, int);
+static void record_sequence(wi_vars_t *, int);
+
 // -----------------------------------------------------------------------
 
 // ⚠ NOT assert().  with asserts on this aborted the process and with
@@ -28,7 +34,8 @@
 
 static void b_emit(wi_vars_t *wi, uint8_t byte)
 {
-    if (wi->out_len >= wi->out_size)
+    if (wi->overrun) { return; }
+    if (wi->out == NULL || wi->out_len >= wi->out_size)
     {
         wi->overrun = 1;
         return;
@@ -39,7 +46,8 @@ static void b_emit(wi_vars_t *wi, uint8_t byte)
 
 static uint8_t b_read(wi_vars_t *wi)
 {
-    if (wi->in_pos >= wi->in_size)
+    if (wi->overrun) { return 0; }
+    if (wi->in == NULL || wi->in_pos >= wi->in_size)
     {
         wi->overrun = 1;
         return 0;
@@ -53,13 +61,15 @@ static uint8_t b_read(wi_vars_t *wi)
 
 static void fs_push(wi_vars_t *wi, int64_t n)
 {
-    assert(wi->fsp < WI_STACK_DEPTH);
+    if (wi->overrun) { return; }
+    if (wi->fsp >= WI_STACK_DEPTH) { wi->overrun = 1; return; }
     wi->fstack[wi->fsp++] = n;
 }
 
 static int64_t fs_pop(wi_vars_t *wi)
 {
-    assert(wi->fsp > 0);
+    if (wi->overrun) { return 0; }
+    if (wi->fsp <= 0) { wi->overrun = 1; return 0; }
     return wi->fstack[--wi->fsp];
 }
 
@@ -68,19 +78,14 @@ static int64_t fs_pop(wi_vars_t *wi)
 
 static int64_t *get_var_addr(wi_vars_t *wi)
 {
-    uint8_t c1 = *wi->f_str++ | 0x20;
+    uint8_t c1 = *wi->f_str | 0x20;
+    if (c1 < 'a' || c1 > 'z') { wi->overrun = 1; return &wi->vars[0]; }
+    wi->f_str++;
     return &wi->vars[c1 - 'a'];
 }
 
 // -----------------------------------------------------------------------
 // scan to next % specifier (used by conditionals)
-
-static char scan(wi_vars_t *wi)
-{
-    while (*wi->f_str++ != '%')
-        ;
-    return (char)*wi->f_str++;
-}
 
 // -----------------------------------------------------------------------
 // specifier implementations
@@ -110,6 +115,7 @@ static void _less   (wi_vars_t *wi) { int64_t a = fs_pop(wi), b = fs_pop(wi); fs
 
 static void _tick(wi_vars_t *wi)
 {
+    if (*wi->f_str == 0 || wi->f_str[1] != '\'') { wi->overrun = 1; return; }
     fs_push(wi, (char)*wi->f_str);
     wi->f_str += 2;             // skip char and closing '
 }
@@ -119,16 +125,19 @@ static void _tick(wi_vars_t *wi)
 
 static void _brace(wi_vars_t *wi)
 {
-    int64_t n = 0;
-    char c1;
-
-    while ((c1 = (char)*wi->f_str++) != '}')
+    uint64_t n = 0;
+    int negative = *wi->f_str == '-';
+    if (negative) { wi->f_str++; }
+    if (*wi->f_str < '0' || *wi->f_str > '9') { wi->overrun = 1; return; }
+    while (*wi->f_str >= '0' && *wi->f_str <= '9')
     {
-        n *= 10;
-        n += c1 - '0';
+        unsigned digit = *wi->f_str++ - '0';
+        if (n > (UINT64_MAX - digit) / 10) { wi->overrun = 1; return; }
+        n = n * 10 + digit;
     }
-
-    fs_push(wi, n);
+    if (*wi->f_str != '}') { wi->overrun = 1; return; }
+    wi->f_str++;
+    fs_push(wi, (int64_t)(negative ? 0 - n : n));
 }
 
 // -----------------------------------------------------------------------
@@ -182,8 +191,8 @@ static void _p(wi_vars_t *wi)
 // -----------------------------------------------------------------------
 // %Px / %gx  store/load named variable
 
-static void _P(wi_vars_t *wi) { *get_var_addr(wi) = fs_pop(wi); }
-static void _g(wi_vars_t *wi) { fs_push(wi, *get_var_addr(wi)); }
+static void _P(wi_vars_t *wi) { if (*wi->f_str == '{') { record_put(wi); } else { *get_var_addr(wi) = fs_pop(wi); } }
+static void _g(wi_vars_t *wi) { if (*wi->f_str == '{') { record_get(wi); } else { fs_push(wi, *get_var_addr(wi)); } }
 
 // %E  raise fault bit(s); abort policy is caller supplied via abort_mask
 static void _E(wi_vars_t *wi)
@@ -195,26 +204,35 @@ static void _E(wi_vars_t *wi)
 // -----------------------------------------------------------------------
 // %?..%t..%e..%;  conditional
 
-static void _t(wi_vars_t *wi)
+static void skip_branch(wi_vars_t *wi, int allow_else)
 {
-    char c1;
-
-    if (fs_pop(wi) != 0)
-        return;
-
-    for (;;)
+    unsigned depth = 0;
+    while (*wi->f_str != 0)
     {
-        c1 = scan(wi);
-        if ((c1 == 'e') || (c1 == ';'))
-            break;
+        int op;
+        if (*wi->f_str++ != '%') { continue; }
+        op = *wi->f_str;
+        if (op == 0) { break; }
+        wi->f_str++;
+        if (op == '?') { depth++; }
+        else if (op == ';') { if (depth == 0) { return; } depth--; }
+        else if (op == 'e' && depth == 0 && allow_else) { return; }
+        else if (op == '\'')
+        {
+            if (*wi->f_str) { wi->f_str++; }
+            if (*wi->f_str) { wi->f_str++; }
+        }
+        else if (op == '{' || *wi->f_str == '{')
+        {
+            while (*wi->f_str && *wi->f_str != '}') { wi->f_str++; }
+            if (*wi->f_str) { wi->f_str++; }
+        }
+        else if (op == 'u' && *wi->f_str) { wi->f_str++; }
     }
+    wi->overrun = 1;
 }
-
-static void _e(wi_vars_t *wi)
-{
-    char c1;
-    do { c1 = scan(wi); } while (c1 != ';');
-}
+static void _t(wi_vars_t *wi) { if (fs_pop(wi) == 0) { skip_branch(wi, 1); } }
+static void _e(wi_vars_t *wi) { skip_branch(wi, 0); }
 
 // -----------------------------------------------------------------------
 // emit specifiers
@@ -261,6 +279,37 @@ static void _bq(wi_vars_t *wi)
     }
 }
 
+// %d  emit TOS as an unsigned SDNV (base-128, most-significant group first)
+static void _bd(wi_vars_t *wi)
+{
+    uint64_t value = (uint64_t)fs_pop(wi);
+    uint8_t encoded[10];
+    size_t length = 1;
+    size_t index;
+    uint64_t remaining = value;
+
+    while (remaining > 0x7fU)
+    {
+        remaining >>= 7;
+        length++;
+    }
+    for (index = 0; index < length; index++)
+    {
+        size_t shift = (length - index - 1U) * 7U;
+        uint8_t byte = (uint8_t)((value >> shift) & 0x7fU);
+
+        if (index + 1U != length)
+        {
+            byte |= 0x80U;
+        }
+        encoded[index] = byte;
+    }
+    for (index = 0; index < length; index++)
+    {
+        b_emit(wi, encoded[index]);
+    }
+}
+
 // %B  read 1 byte from input → push
 static void _rB(wi_vars_t *wi) { fs_push(wi, b_read(wi)); }
 
@@ -298,6 +347,35 @@ static void _rQ(wi_vars_t *wi)
     }
 
     fs_push(wi, (int64_t)v);
+}
+
+// %D  read one unsigned SDNV and push its exact uint64_t bit pattern
+static void _rD(wi_vars_t *wi)
+{
+    uint64_t value = 0;
+    size_t index;
+
+    for (index = 0; index < 10; index++)
+    {
+        uint8_t byte = b_read(wi);
+
+        if (wi->overrun)
+        {
+            return;
+        }
+        if (value > (UINT64_MAX >> 7))
+        {
+            wi->overrun = 1;
+            return;
+        }
+        value = (value << 7) | (uint64_t)(byte & 0x7fU);
+        if ((byte & 0x80U) == 0)
+        {
+            fs_push(wi, (int64_t)value);
+            return;
+        }
+    }
+    wi->overrun = 1;
 }
 
 // %x  encode bit field: pop position, width, value → bit_acc |= (value & mask) << position
@@ -417,6 +495,7 @@ static void _r(wi_vars_t *wi)
 
 static void _R(wi_vars_t *wi)
 {
+    if (*wi->f_str == '{') { record_slice(wi, 0); return; }
     int64_t slot = fs_pop(wi);
 
     if (wi->out != NULL || wi->in == NULL || slot < 0 || slot >= WI_MAX_PARAMS ||
@@ -431,10 +510,52 @@ static void _R(wi_vars_t *wi)
     wi->in_pos = wi->in_size;
 }
 
+// %N - pop a slice slot and exact length, then capture exactly that many bytes.
+static void _N(wi_vars_t *wi)
+{
+    if (*wi->f_str == '{') { record_slice(wi, 1); return; }
+    int64_t slot = fs_pop(wi);
+    int64_t requested = fs_pop(wi);
+    size_t length;
+
+    if (wi->out != NULL || wi->in == NULL || slot < 0 ||
+        slot >= WI_MAX_PARAMS || requested < 0 ||
+        (uint64_t)requested > SIZE_MAX)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    length = (size_t)requested;
+    if (wi->in_pos > wi->in_size || length > wi->in_size - wi->in_pos)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    wi->slices[slot].data = wi->in + wi->in_pos;
+    wi->slices[slot].length = length;
+    wi->in_pos += length;
+}
+
+// %z - pop a slice slot and push its length.
+static void _z(wi_vars_t *wi)
+{
+    if (*wi->f_str == '{') { record_length(wi, 0); return; }
+    int64_t slot = fs_pop(wi);
+
+    if (slot < 0 || slot >= WI_MAX_PARAMS ||
+        wi->slices[slot].length > INT64_MAX)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    fs_push(wi, (int64_t)wi->slices[slot].length);
+}
+
 // %v - emit the byte slice in the zero-based slot popped from the stack.
 
 static void _v(wi_vars_t *wi)
 {
+    if (*wi->f_str == '{') { record_slice(wi, 0); return; }
     int64_t slot = fs_pop(wi);
     size_t index;
 
@@ -446,6 +567,175 @@ static void _v(wi_vars_t *wi)
     }
     for (index = 0; index < wi->slices[slot].length; index++)
         b_emit(wi, wi->slices[slot].data[index]);
+}
+
+// %V - pop a slice slot and exact length, verify equality, then emit it.
+static void _bV(wi_vars_t *wi)
+{
+    if (*wi->f_str == '{') { record_slice(wi, 1); return; }
+    int64_t slot = fs_pop(wi);
+    int64_t requested = fs_pop(wi);
+    size_t index;
+
+    if (wi->out == NULL || slot < 0 || slot >= WI_MAX_PARAMS ||
+        requested < 0 || (uint64_t)requested > SIZE_MAX ||
+        wi->slices[slot].length != (size_t)requested ||
+        (wi->slices[slot].data == NULL && requested != 0))
+    {
+        wi->overrun = 1;
+        return;
+    }
+    for (index = 0; index < wi->slices[slot].length; index++)
+    {
+        b_emit(wi, wi->slices[slot].data[index]);
+    }
+}
+
+// %k - pop a record-list slot and push its current record count.
+static void _k(wi_vars_t *wi)
+{
+    if (*wi->f_str == '{') { record_length(wi, 1); return; }
+    int64_t slot = fs_pop(wi);
+    wi_record_list_t *list;
+
+    if (slot < 0 || slot >= WI_MAX_PARAMS)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    list = wi->record_lists[slot];
+    if (list == NULL || list->count > INT64_MAX)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    fs_push(wi, (int64_t)list->count);
+}
+
+static size_t wi_parse_rank(wi_vars_t *v, const char *fmt, int rank);
+
+/*
+ * %J[n] - process a counted sequence of message n.
+ *
+ * The stack supplies count, record-list slot, and child caller-field count,
+ * in that order.  Each row gets an independent scalar/slice/list namespace;
+ * the byte stream, fault state, and format table remain shared.
+ */
+static void _J(wi_vars_t *wi)
+{
+    int n = 0;
+    int digits = 0;
+    int64_t field_count_value;
+    int64_t slot_value;
+    int64_t count_value;
+    size_t count;
+    size_t field_count;
+    size_t row_index;
+    wi_record_list_t *list;
+
+    if (*wi->f_str == '[')
+    {
+        wi->f_str++;
+    }
+    while ((*wi->f_str >= '0') && (*wi->f_str <= '9') && (digits < 4))
+    {
+        n = (n * 10) + (*wi->f_str++ - '0');
+        digits++;
+    }
+    if (*wi->f_str == ']')
+    {
+        wi->f_str++;
+    }
+
+    if (*wi->f_str == '{') { record_sequence(wi, digits ? n : -1); return; }
+    field_count_value = fs_pop(wi);
+    slot_value = fs_pop(wi);
+    count_value = fs_pop(wi);
+    if (digits == 0 || wi->fmts == NULL || n < 0 || n >= wi->nfmts ||
+        n >= wi->cur_fmt || wi->fmts[n] == NULL || field_count_value < 0 ||
+        field_count_value > WI_MAX_PARAMS || slot_value < 0 ||
+        slot_value >= WI_MAX_PARAMS || count_value < 0 ||
+        (uint64_t)count_value > SIZE_MAX)
+    {
+        wi->overrun = 1;
+        return;
+    }
+    if (wi->sequence_depth >= WI_CALL_DEPTH)
+    {
+        wi->overrun = 1;
+        return;
+    }
+
+    count = (size_t)count_value;
+    field_count = (size_t)field_count_value;
+    list = wi->record_lists[slot_value];
+    if (list == NULL || list->records == NULL || field_count != list->field_count ||
+        count > list->capacity || (wi->out != NULL && count != list->count))
+    {
+        wi->overrun = 1;
+        return;
+    }
+    if (wi->in != NULL)
+    {
+        list->count = count;
+    }
+
+    for (row_index = 0; row_index < count; row_index++)
+    {
+        wi_record_t *row = &list->records[row_index];
+        wi_vars_t child;
+        size_t field_index;
+
+        if (wi->out != NULL)
+        {
+            wi_init(&child, wi->out + wi->out_len,
+                    wi->out_size - wi->out_len, row->values,
+                    (int)field_count);
+            for (field_index = 0; field_index < field_count; field_index++)
+            {
+                child.slices[field_index] = row->slices[field_index];
+                child.record_lists[field_index] = row->lists[field_index];
+            }
+        }
+        else
+        {
+            wi_decode_init(&child, wi->in + wi->in_pos,
+                           wi->in_size - wi->in_pos, NULL, 0);
+            for (field_index = 0; field_index < field_count; field_index++)
+            {
+                child.record_lists[field_index] = row->lists[field_index];
+            }
+        }
+        child.fmts = wi->fmts;
+        child.nfmts = wi->nfmts;
+        child.abort_mask = wi->abort_mask;
+        child.sequence_depth = wi->sequence_depth + 1;
+        wi_parse_rank(&child, wi->fmts[n], n);
+
+        wi->faults |= child.faults;
+        if (child.overrun != 0)
+        {
+            wi->overrun = 1;
+            return;
+        }
+        if (wi->out != NULL)
+        {
+            wi->out_len += child.out_len;
+        }
+        else
+        {
+            wi->in_pos += child.in_pos;
+            for (field_index = 0; field_index < field_count; field_index++)
+            {
+                row->values[field_index] = child.vars[field_index];
+                row->slices[field_index] = child.slices[field_index];
+            }
+        }
+        if ((wi->faults & wi->abort_mask) != 0)
+        {
+            return;
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -565,14 +855,17 @@ static void _call(wi_vars_t *wi)
 
 // -----------------------------------------------------------------------
 
+#include "wire_format_record.inc"
+
 static const wi_op_t ops[] =
 {
     { '%', _percent }, { 'p', _p      }, { 'c', _c      },
     { 'b', _b       }, { 'w', _w      }, { 'W', _bW     }, { 'r', _r      },
-    { 'R', _R       },
-    { 'v', _v       },
+    { 'R', _R       }, { 'N', _N      }, { 'z', _z      },
+    { 'v', _v       }, { 'V', _bV     }, { 'k', _k      },
     { 'B', _rB      }, { 'S', _rS     }, { 'L', _rL     },
-    { 'q', _bq      }, { 'Q', _rQ     },
+    { 'q', _bq      }, { 'Q', _rQ     }, { 'd', _bd      },
+    { 'D', _rD      },
     { 'x', _bx      }, { 'X', _bX     }, { 'f', _f      },
     { '&', _and     }, { 'A', _andl   }, { '|', _or     },
     { 'O', _orl     }, { '^', _xor    }, { '~', _not    },
@@ -582,7 +875,8 @@ static const wi_op_t ops[] =
     { 0x27, _tick   }, { '{', _brace  }, { 'P', _P      },
     { 'g', _g       }, { 'E', _E      }, { '?', NULL    }, { 't', _t      },
     { 'e', _e       }, { ';', NULL    }, { '[', _call   },
-    { ':', _colon   },
+    { ':', _colon   }, { 'J', _J       },
+    { 'i', record_emit_bits }, { 'j', record_read_bits }, { 'u', record_extension },
 };
 
 #define OPS_COUNT  (sizeof(ops) / sizeof(ops[0]))
@@ -656,9 +950,21 @@ int wi_set_slice(wi_vars_t *v, int slot, const uint8_t *data, size_t length)
     return 0;
 }
 
+int wi_set_record_list(wi_vars_t *v, int slot, wi_record_list_t *list)
+{
+    if (v == NULL || slot < 0 || slot >= WI_MAX_PARAMS || list == NULL ||
+        list->field_count > WI_MAX_PARAMS || list->count > list->capacity ||
+        (list->records == NULL && list->capacity != 0))
+    {
+        return -1;
+    }
+    v->record_lists[slot] = list;
+    return 0;
+}
+
 // -----------------------------------------------------------------------
 
-size_t wi_parse(wi_vars_t *v, const char *fmt)
+static size_t wi_parse_rank(wi_vars_t *v, const char *fmt, int rank)
 {
     v->f_str   = (const uint8_t *)fmt;
     v->out_len = 0;
@@ -669,7 +975,7 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
 
     // the top level string is not in the table, so it outranks all of it
 
-    v->cur_fmt = v->nfmts;
+    v->cur_fmt = rank;
 
     for (;;)
     {
@@ -710,12 +1016,19 @@ size_t wi_parse(wi_vars_t *v, const char *fmt)
         int c1 = *v->f_str++;
 
         if (c1 == '%')
-            wi_switch(v, next_c(v));
+        {
+            if (*v->f_str == 0 || wi_switch(v, next_c(v)) != 0) { v->overrun = 1; }
+        }
         else
             b_emit(v, (uint8_t)c1);
     }
 
     return v->out_len;
+}
+
+size_t wi_parse(wi_vars_t *v, const char *fmt)
+{
+    return wi_parse_rank(v, fmt, v->nfmts);
 }
 
 // -----------------------------------------------------------------------
@@ -752,11 +1065,12 @@ static int next_call(const char **pp)
             continue;
         }
 
-        if (*p == '[')                       // the one we want
+        if (*p == '[' || (*p == 'J' && p[1] == '['))
         {
             int n = 0, d = 0;
 
-            p++;
+            if (*p == 'J') { p += 2; }
+            else { p++; }
             while ((*p >= '0') && (*p <= '9') && (d < 4))
             { n = (n * 10) + (*p++ - '0'); d++; }
             if (*p == ']') { p++; }

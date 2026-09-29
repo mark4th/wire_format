@@ -169,14 +169,24 @@ static int name_value(const json5_value_t *object, const char *what,
 static int parse_field(const json5_value_t *source, wfc_field_t *field,
                        uint16_t version, wfc_error_t *error)
 {
-    static const char *const allowed[] = {"name", "type", "width", "constant"};
+    static const char *const allowed[] = {
+        "name", "type", "width", "constant", "length_from", "length_of",
+        "message", "count_from", "count_of", "select_from", "cases"
+    };
     const json5_value_t *type_value;
     const json5_value_t *width_value;
     const json5_value_t *constant_value;
+    const json5_value_t *length_from_value;
+    const json5_value_t *length_of_value;
+    const json5_value_t *message_value;
+    const json5_value_t *count_from_value;
+    const json5_value_t *count_of_value;
+    const json5_value_t *select_from_value;
+    const json5_value_t *cases_value;
     char *type = NULL;
     uint64_t width;
 
-    if (!object_shape(source, "field", allowed, 4, error) ||
+    if (!object_shape(source, "field", allowed, 11, error) ||
         !name_value(source, "field", &field->name, &field->location, error))
         return 0;
     type_value = required_member(source, "type", "field", error);
@@ -220,6 +230,16 @@ static int parse_field(const json5_value_t *source, wfc_field_t *field,
             field->type = WFC_U32;
         else if (strcmp(type, "u64") == 0)
             field->type = WFC_U64;
+        else if (strcmp(type, "sdnv") == 0) {
+            if (version < 3) {
+                wfc_set_error(error, location_of(type_value),
+                              "SDNV field `%s` requires wire_format version 3",
+                              field->name);
+                free(type);
+                return 0;
+            }
+            field->type = WFC_SDNV;
+        }
         else if (strcmp(type, "bytes") == 0) {
             if (version < 2) {
                 wfc_set_error(error, location_of(type_value),
@@ -229,9 +249,19 @@ static int parse_field(const json5_value_t *source, wfc_field_t *field,
                 return 0;
             }
             field->type = WFC_BYTES;
+        } else if (strcmp(type, "records") == 0 || strcmp(type, "choice") == 0) {
+            if (version < 3) {
+                wfc_set_error(error, location_of(type_value),
+                              "field `%s` requires wire_format version 3",
+                              field->name);
+                free(type);
+                return 0;
+            }
+            field->type = strcmp(type, "records") == 0
+                              ? WFC_RECORDS : WFC_CHOICE;
         } else {
             wfc_set_error(error, location_of(type_value),
-                          "field `%s` type must be `bits`, `u8`, `u16`, `u32`, `u64`, or `bytes`",
+                          "field `%s` has an unsupported type",
                           field->name);
             free(type);
             return 0;
@@ -240,16 +270,145 @@ static int parse_field(const json5_value_t *source, wfc_field_t *field,
     free(type);
 
     constant_value = find_member(source, "constant");
-    if (field->type == WFC_BYTES && constant_value != NULL) {
+    length_from_value = find_member(source, "length_from");
+    length_of_value = find_member(source, "length_of");
+    message_value = find_member(source, "message");
+    count_from_value = find_member(source, "count_from");
+    count_of_value = find_member(source, "count_of");
+    select_from_value = find_member(source, "select_from");
+    cases_value = find_member(source, "cases");
+    if ((length_from_value != NULL || length_of_value != NULL ||
+         count_from_value != NULL || count_of_value != NULL ||
+         select_from_value != NULL) && version < 3) {
+        wfc_set_error(error, field->location,
+                      "length relationships require wire_format version 3");
+        return 0;
+    }
+    if (length_from_value != NULL) {
+        if (field->type != WFC_BYTES) {
+            wfc_set_error(error, location_of(length_from_value),
+                          "only a byte field may specify `length_from`");
+            return 0;
+        }
+        field->length_from = string_value(length_from_value, "length_from", error);
+        if (field->length_from == NULL || !wfc_identifier_valid(field->length_from))
+            return 0;
+    }
+    if (length_of_value != NULL) {
+        if (field->type == WFC_BYTES || field->type == WFC_BITS ||
+            field->type == WFC_RECORDS || field->type == WFC_CHOICE) {
+            wfc_set_error(error, location_of(length_of_value),
+                          "a byte or bit field may not specify `length_of`");
+            return 0;
+        }
+        field->length_of = string_value(length_of_value, "length_of", error);
+        if (field->length_of == NULL || !wfc_identifier_valid(field->length_of))
+            return 0;
+    }
+    if (constant_value != NULL && length_of_value != NULL) {
+        wfc_set_error(error, field->location,
+                      "field `%s` may not specify both `constant` and `length_of`",
+                      field->name);
+        return 0;
+    }
+    if ((field->type == WFC_BYTES || field->type == WFC_RECORDS ||
+         field->type == WFC_CHOICE) && constant_value != NULL) {
         wfc_set_error(error, location_of(constant_value),
                       "byte field `%s` may not specify `constant`", field->name);
+        return 0;
+    }
+    if ((field->type == WFC_RECORDS) != (count_from_value != NULL) ||
+        (field->type == WFC_RECORDS) != (message_value != NULL)) {
+        wfc_set_error(error, field->location,
+                      "record field `%s` requires exactly one `message` and `count_from`",
+                      field->name);
+        return 0;
+    }
+    if (count_of_value != NULL) {
+        if (field->type == WFC_BYTES || field->type == WFC_RECORDS ||
+            field->type == WFC_CHOICE) {
+            wfc_set_error(error, location_of(count_of_value),
+                          "only a scalar field may specify `count_of`");
+            return 0;
+        }
+        if (constant_value != NULL) {
+            wfc_set_error(error, field->location,
+                          "field `%s` may not specify both `constant` and `count_of`",
+                          field->name);
+            return 0;
+        }
+    }
+    if (message_value != NULL) {
+        field->message = string_value(message_value, "message", error);
+        if (field->message == NULL || !wfc_identifier_valid(field->message))
+            return 0;
+    }
+    if (count_from_value != NULL) {
+        field->count_from = string_value(count_from_value, "count_from", error);
+        if (field->count_from == NULL || !wfc_identifier_valid(field->count_from))
+            return 0;
+    }
+    if (count_of_value != NULL) {
+        field->count_of = string_value(count_of_value, "count_of", error);
+        if (field->count_of == NULL || !wfc_identifier_valid(field->count_of))
+            return 0;
+    }
+    if (field->type == WFC_CHOICE) {
+        size_t case_index;
+        if (select_from_value == NULL || cases_value == NULL ||
+            cases_value->type != JSON5_ARRAY || cases_value->as.array.count == 0) {
+            wfc_set_error(error, field->location,
+                          "choice field `%s` requires `select_from` and at least one case",
+                          field->name);
+            return 0;
+        }
+        field->select_from = string_value(select_from_value, "select_from", error);
+        if (field->select_from == NULL || !wfc_identifier_valid(field->select_from))
+            return 0;
+        field->case_count = cases_value->as.array.count;
+        field->cases = calloc(field->case_count, sizeof(*field->cases));
+        if (field->cases == NULL) {
+            wfc_set_error(error, location_of(cases_value), "out of memory");
+            return 0;
+        }
+        for (case_index = 0; case_index < field->case_count; case_index++) {
+            static const char *const case_allowed[] = {"value", "message"};
+            const json5_value_t *item = cases_value->as.array.items[case_index];
+            const json5_value_t *case_value;
+            const json5_value_t *case_message;
+            size_t previous;
+            if (!object_shape(item, "choice case", case_allowed, 2, error))
+                return 0;
+            case_value = required_member(item, "value", "choice case", error);
+            case_message = required_member(item, "message", "choice case", error);
+            if (case_value == NULL || case_message == NULL ||
+                !parse_u64(case_value, "choice selector", &field->cases[case_index].value, error))
+                return 0;
+            field->cases[case_index].location = location_of(item);
+            field->cases[case_index].message = string_value(case_message, "choice message", error);
+            if (field->cases[case_index].message == NULL ||
+                !wfc_identifier_valid(field->cases[case_index].message))
+                return 0;
+            for (previous = 0; previous < case_index; previous++)
+                if (field->cases[previous].value == field->cases[case_index].value) {
+                    wfc_set_error(error, location_of(case_value),
+                                  "choice field `%s` repeats selector value %llu",
+                                  field->name,
+                                  (unsigned long long)field->cases[case_index].value);
+                    return 0;
+                }
+        }
+    } else if (select_from_value != NULL || cases_value != NULL) {
+        wfc_set_error(error, field->location,
+                      "only a choice field may specify `select_from` or `cases`");
         return 0;
     }
     if (constant_value != NULL) {
         field->is_constant = 1;
         if (!parse_u64(constant_value, "field constant", &field->constant, error))
             return 0;
-        if (!wfc_value_fits(field->constant, wfc_field_width(field))) {
+        if (field->type != WFC_SDNV &&
+            !wfc_value_fits(field->constant, wfc_field_width(field))) {
             wfc_set_error(error, location_of(constant_value),
                           "value %llu does not fit in a %u-bit field",
                           (unsigned long long)field->constant,
@@ -405,6 +564,7 @@ static int parse_message(const json5_value_t *source, wfc_message_t *message,
                          version, error))
             return 0;
         if (message->fields[index].type == WFC_BYTES &&
+            message->fields[index].length_from == NULL &&
             index + 1 != message->field_count) {
             wfc_set_error(error, message->fields[index].location,
                           "byte field `%s` must be the final field in its message",
@@ -417,6 +577,96 @@ static int parse_message(const json5_value_t *source, wfc_message_t *message,
                               "duplicate field `%s`", message->fields[index].name);
                 return 0;
             }
+    }
+    if (version >= 3) {
+        for (index = 0; index < message->field_count; index++) {
+            wfc_field_t *field = &message->fields[index];
+            size_t target_index;
+            wfc_field_t *target = NULL;
+
+            const char *wanted;
+
+            if (field->length_of == NULL && field->length_from == NULL &&
+                field->count_of == NULL && field->count_from == NULL &&
+                field->select_from == NULL)
+                continue;
+            wanted = field->length_of != NULL ? field->length_of :
+                     field->length_from != NULL ? field->length_from :
+                     field->count_of != NULL ? field->count_of :
+                     field->count_from != NULL ? field->count_from :
+                     field->select_from;
+            for (target_index = 0; target_index < message->field_count;
+                 target_index++) {
+                if (strcmp(message->fields[target_index].name, wanted) == 0) {
+                    target = &message->fields[target_index];
+                    break;
+                }
+            }
+            if (target == NULL) {
+                wfc_set_error(error, field->location,
+                              "field `%s` references unknown field `%s`",
+                              field->name, wanted);
+                return 0;
+            }
+            if (field->length_of != NULL) {
+                if (target->type != WFC_BYTES || target_index <= index ||
+                    target->length_from == NULL ||
+                    strcmp(target->length_from, field->name) != 0) {
+                    wfc_set_error(error, field->location,
+                                  "length field `%s` and byte field `%s` must reference each other, with the length first",
+                                  field->name, target->name);
+                    return 0;
+                }
+            } else if (field->length_from != NULL) {
+                if (target->type == WFC_BYTES || target_index >= index ||
+                    target->length_of == NULL ||
+                    strcmp(target->length_of, field->name) != 0) {
+                    wfc_set_error(error, field->location,
+                                  "byte field `%s` and length field `%s` must reference each other, with the length first",
+                                  field->name, target->name);
+                    return 0;
+                }
+            } else if (field->count_of != NULL) {
+                if (target->type != WFC_RECORDS || target_index <= index ||
+                    target->count_from == NULL ||
+                    strcmp(target->count_from, field->name) != 0) {
+                    wfc_set_error(error, field->location,
+                                  "count field `%s` and record field `%s` must reference each other, with the count first",
+                                  field->name, target->name);
+                    return 0;
+                }
+            } else if (field->count_from != NULL) {
+                if (target->type == WFC_BYTES || target->type == WFC_RECORDS ||
+                    target->type == WFC_CHOICE || target_index >= index ||
+                    target->count_of == NULL ||
+                    strcmp(target->count_of, field->name) != 0) {
+                    wfc_set_error(error, field->location,
+                                  "record field `%s` and count field `%s` must reference each other, with the count first",
+                                  field->name, target->name);
+                    return 0;
+                }
+            } else if (target_index >= index || target->type == WFC_BYTES ||
+                       target->type == WFC_RECORDS || target->type == WFC_CHOICE ||
+                       target->is_constant || target->length_of != NULL ||
+                       target->count_of != NULL) {
+                wfc_set_error(error, field->location,
+                              "choice field `%s` requires an earlier scalar selector",
+                              field->name);
+                return 0;
+            } else {
+                size_t case_index;
+                for (case_index = 0; case_index < field->case_count; case_index++)
+                    if (target->type != WFC_SDNV &&
+                        !wfc_value_fits(field->cases[case_index].value,
+                                        wfc_field_width(target))) {
+                        wfc_set_error(error, field->cases[case_index].location,
+                                      "choice selector value %llu does not fit field `%s`",
+                                      (unsigned long long)field->cases[case_index].value,
+                                      target->name);
+                        return 0;
+                    }
+            }
+        }
     }
 
     vectors = find_member(source, "vectors");
@@ -536,6 +786,39 @@ static int parse_protocol(const json5_value_t *source, wfc_protocol_t *protocol,
                 return 0;
             }
     }
+    for (index = 0; index < protocol->message_count; index++) {
+        wfc_message_t *message = &protocol->messages[index];
+        size_t field_index;
+        for (field_index = 0; field_index < message->field_count; field_index++) {
+            wfc_field_t *field = &message->fields[field_index];
+            size_t case_index;
+            if (field->message != NULL) {
+                size_t target;
+                for (target = 0; target < index; target++)
+                    if (strcmp(protocol->messages[target].name, field->message) == 0)
+                        break;
+                if (target == index) {
+                    wfc_set_error(error, field->location,
+                                  "record field `%s` must reference an earlier message `%s`",
+                                  field->name, field->message);
+                    return 0;
+                }
+            }
+            for (case_index = 0; case_index < field->case_count; case_index++) {
+                size_t target;
+                for (target = 0; target < index; target++)
+                    if (strcmp(protocol->messages[target].name,
+                               field->cases[case_index].message) == 0)
+                        break;
+                if (target == index) {
+                    wfc_set_error(error, field->cases[case_index].location,
+                                  "choice field `%s` must reference an earlier message `%s`",
+                                  field->name, field->cases[case_index].message);
+                    return 0;
+                }
+            }
+        }
+    }
     return 1;
 }
 
@@ -565,9 +848,18 @@ int wfc_source_parse(const char *text, size_t length, wfc_protocol_t *protocol,
     if (version == NULL || source_protocol == NULL ||
         !parse_u64(version, "wire_format", &version_number, error))
         goto done;
-    if (version_number != 1 && version_number != 2) {
+    if (version_number == 4) {
+        protocol->version = 4;
+        protocol->record_source = root;
+        {
+            const json5_value_t *name = source_protocol->type == JSON5_OBJECT ? find_member(source_protocol, "name") : NULL;
+            if (name != NULL && name->type == JSON5_STRING) { protocol->name = wfc_duplicate(name->as.scalar.text, name->as.scalar.length); }
+        }
+        return 1;
+    }
+    if (version_number != 1 && version_number != 2 && version_number != 3) {
         wfc_set_error(error, location_of(version),
-                      "unsupported wire_format version %llu; expected 1 or 2",
+                      "unsupported wire_format version %llu; expected 1, 2, 3, or 4",
                       (unsigned long long)version_number);
         goto done;
     }
@@ -584,6 +876,7 @@ done:
 void wfc_protocol_free(wfc_protocol_t *protocol)
 {
     size_t message_index;
+    json5_free(protocol->record_source);
     free(protocol->name);
     free(protocol->description);
     free(protocol->standard);
@@ -594,8 +887,21 @@ void wfc_protocol_free(wfc_protocol_t *protocol)
         size_t vector_index;
         free(message->name);
         free(message->description);
-        for (field_index = 0; field_index < message->field_count; field_index++)
+        for (field_index = 0; field_index < message->field_count; field_index++) {
+            size_t case_index;
             free(message->fields[field_index].name);
+            free(message->fields[field_index].length_from);
+            free(message->fields[field_index].length_of);
+            free(message->fields[field_index].message);
+            free(message->fields[field_index].count_from);
+            free(message->fields[field_index].count_of);
+            free(message->fields[field_index].select_from);
+            for (case_index = 0;
+                 case_index < message->fields[field_index].case_count;
+                 case_index++)
+                free(message->fields[field_index].cases[case_index].message);
+            free(message->fields[field_index].cases);
+        }
         free(message->fields);
         for (vector_index = 0; vector_index < message->vector_count; vector_index++) {
             wfc_vector_t *vector = &message->vectors[vector_index];

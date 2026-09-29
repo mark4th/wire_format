@@ -1,0 +1,54 @@
+{
+  wire_format: 3,
+  protocol: {
+    name: 'record-demo',
+    description: 'Version 3 counted records and selected message alternatives',
+    standard: 'wire_format version 3',
+    reference: 'doc/WF_FILE_FORMAT_V3.md',
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+    messages: [
+      {
+        name: 'item',
+        description: 'One repeated item',
+        fields: [
+          { name: 'tag', type: 'u8' },
+          { name: 'value', type: 'sdnv' },
+        ],
+        vectors: [
+          { name: 'one', values: { tag: 0x11, value: 0xabc }, wire: [0x11, 0x95, 0x3c] },
+        ],
+      },
+      {
+        name: 'short-body',
+        description: 'First alternative',
+        fields: [ { name: 'value', type: 'u8' } ],
+        vectors: [ { name: 'one', values: { value: 0x44 }, wire: [0x44] } ],
+      },
+      {
+        name: 'long-body',
+        description: 'Second alternative',
+        fields: [ { name: 'value', type: 'u16' } ],
+        vectors: [ { name: 'one', values: { value: 0x4455 }, wire: [0x44, 0x55] } ],
+      },
+      {
+        name: 'container',
+        description: 'A counted item sequence followed by one selected body',
+        fields: [
+          { name: 'item-count', type: 'bits', width: 4, count_of: 'items' },
+          { name: 'body-kind', type: 'bits', width: 4 },
+          { name: 'items', type: 'records', message: 'item', count_from: 'item-count' },
+          {
+            name: 'body',
+            type: 'choice',
+            select_from: 'body-kind',
+            cases: [
+              { value: 0, message: 'short-body' },
+              { value: 1, message: 'long-body' },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+}

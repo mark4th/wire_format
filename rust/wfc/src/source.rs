@@ -50,7 +50,10 @@ pub enum FieldType {
     U16,
     U32,
     U64,
+    Sdnv,
     Bytes,
+    Records,
+    Choice,
 }
 
 impl FieldType {
@@ -61,12 +64,17 @@ impl FieldType {
             Self::U16 => 16,
             Self::U32 => 32,
             Self::U64 => 64,
+            Self::Sdnv => 8,
             Self::Bytes => 0,
+            Self::Records | Self::Choice => 0,
         }
     }
 
     pub fn is_scalar(self) -> bool {
-        matches!(self, Self::U8 | Self::U16 | Self::U32 | Self::U64)
+        matches!(
+            self,
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Sdnv
+        )
     }
 }
 
@@ -82,6 +90,20 @@ pub struct Field {
     pub location: Location,
     pub field_type: FieldType,
     pub kind: FieldKind,
+    pub length_from: Option<String>,
+    pub length_of: Option<String>,
+    pub message: Option<String>,
+    pub count_from: Option<String>,
+    pub count_of: Option<String>,
+    pub select_from: Option<String>,
+    pub cases: Vec<ChoiceCase>,
+}
+
+#[derive(Debug)]
+pub struct ChoiceCase {
+    pub value: u64,
+    pub message: String,
+    pub location: Location,
 }
 
 #[derive(Debug)]
@@ -174,6 +196,27 @@ struct SourceField {
     width: Option<u64>,
     #[serde(default)]
     constant: Option<u64>,
+    #[serde(default)]
+    length_from: Option<String>,
+    #[serde(default)]
+    length_of: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    count_from: Option<String>,
+    #[serde(default)]
+    count_of: Option<String>,
+    #[serde(default)]
+    select_from: Option<String>,
+    #[serde(default)]
+    cases: Vec<SourceChoiceCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceChoiceCase {
+    value: u64,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -243,11 +286,11 @@ pub fn parse(text: &str) -> Result<Protocol> {
 
     let source: SourceFile =
         json_five::from_str(text).map_err(|error| Diagnostic::new(DOCUMENT, error.to_string()))?;
-    if source.wire_format != 1 && source.wire_format != 2 {
+    if source.wire_format != 1 && source.wire_format != 2 && source.wire_format != 3 {
         return Err(Diagnostic::new(
             DOCUMENT,
             format!(
-                "unsupported wire_format version {}; expected 1 or 2",
+                "unsupported wire_format version {}; expected 1, 2, or 3",
                 source.wire_format
             ),
         ));
@@ -276,6 +319,57 @@ impl SourceProtocol {
                 ));
             }
             messages.push(message);
+        }
+
+        for (message_index, message) in messages.iter().enumerate() {
+            for field in &message.fields {
+                if let Some(target_name) = &field.message {
+                    let target_index = messages
+                        .iter()
+                        .position(|candidate| candidate.name == *target_name)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                field.location,
+                                format!(
+                                    "record field `{}` references unknown message `{target_name}`",
+                                    field.name
+                                ),
+                            )
+                        })?;
+                    if target_index >= message_index {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "record field `{}` must reference an earlier message",
+                                field.name
+                            ),
+                        ));
+                    }
+                }
+                for case in &field.cases {
+                    let target_index = messages
+                        .iter()
+                        .position(|candidate| candidate.name == case.message)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                case.location,
+                                format!(
+                                    "choice field `{}` references unknown message `{}`",
+                                    field.name, case.message
+                                ),
+                            )
+                        })?;
+                    if target_index >= message_index {
+                        return Err(Diagnostic::new(
+                            case.location,
+                            format!(
+                                "choice field `{}` must reference an earlier message",
+                                field.name
+                            ),
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(Protocol {
@@ -307,7 +401,10 @@ impl SourceMessage {
         let field_count = self.fields.len();
         for (field_index, field) in self.fields.into_iter().enumerate() {
             let field = field.compile(version)?;
-            if matches!(field.field_type, FieldType::Bytes) && field_index + 1 != field_count {
+            if matches!(field.field_type, FieldType::Bytes)
+                && field.length_from.is_none()
+                && field_index + 1 != field_count
+            {
                 return Err(Diagnostic::new(
                     DOCUMENT,
                     format!(
@@ -323,6 +420,133 @@ impl SourceMessage {
                 ));
             }
             fields.push(field);
+        }
+
+        if version >= 3 {
+            for (index, field) in fields.iter().enumerate() {
+                let Some(reference) = field
+                    .length_of
+                    .as_ref()
+                    .or(field.length_from.as_ref())
+                    .or(field.count_of.as_ref())
+                    .or(field.count_from.as_ref())
+                else {
+                    continue;
+                };
+                let Some((target_index, target)) = fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, candidate)| candidate.name == *reference)
+                else {
+                    return Err(Diagnostic::new(
+                        field.location,
+                        format!(
+                            "field `{}` references unknown field `{reference}`",
+                            field.name
+                        ),
+                    ));
+                };
+                if field.length_of.is_some() {
+                    if !matches!(target.field_type, FieldType::Bytes)
+                        || target_index <= index
+                        || target.length_from.as_deref() != Some(field.name.as_str())
+                    {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "length field `{}` and byte field `{}` must reference each other, with the length first",
+                                field.name, target.name
+                            ),
+                        ));
+                    }
+                } else if field.length_from.is_some() {
+                    if matches!(target.field_type, FieldType::Bytes)
+                        || target_index >= index
+                        || target.length_of.as_deref() != Some(field.name.as_str())
+                    {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "byte field `{}` and length field `{}` must reference each other, with the length first",
+                                field.name, target.name
+                            ),
+                        ));
+                    }
+                } else if field.count_of.is_some() {
+                    if !matches!(target.field_type, FieldType::Records)
+                        || target_index <= index
+                        || target.count_from.as_deref() != Some(field.name.as_str())
+                    {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "count field `{}` and record field `{}` must reference each other, with the count first",
+                                field.name, target.name
+                            ),
+                        ));
+                    }
+                } else if matches!(
+                    target.field_type,
+                    FieldType::Bytes | FieldType::Records | FieldType::Choice
+                ) || target_index >= index
+                    || target.count_of.as_deref() != Some(field.name.as_str())
+                {
+                    return Err(Diagnostic::new(
+                        field.location,
+                        format!(
+                            "record field `{}` and count field `{}` must reference each other, with the count first",
+                            field.name, target.name
+                        ),
+                    ));
+                }
+            }
+
+            for field in &fields {
+                if let Some(selector) = &field.select_from {
+                    let Some((selector_index, selector_field)) = fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, candidate)| candidate.name == *selector)
+                    else {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "choice field `{}` references unknown selector `{selector}`",
+                                field.name
+                            ),
+                        ));
+                    };
+                    if selector_index
+                        >= fields
+                            .iter()
+                            .position(|candidate| candidate.name == field.name)
+                            .unwrap()
+                        || !matches!(
+                            selector_field.field_type,
+                            FieldType::Bits(_)
+                                | FieldType::U8
+                                | FieldType::U16
+                                | FieldType::U32
+                                | FieldType::U64
+                                | FieldType::Sdnv
+                        )
+                        || !matches!(selector_field.kind, FieldKind::Supplied)
+                        || selector_field.length_of.is_some()
+                        || selector_field.count_of.is_some()
+                    {
+                        return Err(Diagnostic::new(
+                            field.location,
+                            format!(
+                                "choice field `{}` requires an earlier scalar selector",
+                                field.name
+                            ),
+                        ));
+                    }
+                    for case in &field.cases {
+                        ensure_value_fits(case.value, selector_field.field_type, case.location)?;
+                    }
+                }
+            }
         }
 
         let mut vector_names = HashSet::new();
@@ -367,7 +591,7 @@ impl SourceField {
                 }
                 FieldType::Bits(width as u8)
             }
-            "u8" | "u16" | "u32" | "u64" => {
+            "u8" | "u16" | "u32" | "u64" | "sdnv" => {
                 if self.width.is_some() {
                     return Err(Diagnostic::new(
                         DOCUMENT,
@@ -379,6 +603,7 @@ impl SourceField {
                     "u16" => FieldType::U16,
                     "u32" => FieldType::U32,
                     "u64" => FieldType::U64,
+                    "sdnv" => FieldType::Sdnv,
                     _ => unreachable!(),
                 }
             }
@@ -397,11 +622,33 @@ impl SourceField {
                 }
                 FieldType::Bytes
             }
+            "records" | "choice" => {
+                if version < 3 {
+                    return Err(Diagnostic::new(
+                        DOCUMENT,
+                        format!("field `{}` requires wire_format version 3", self.name),
+                    ));
+                }
+                if self.width.is_some() || self.constant.is_some() {
+                    return Err(Diagnostic::new(
+                        DOCUMENT,
+                        format!(
+                            "record field `{}` may not specify `width` or `constant`",
+                            self.name
+                        ),
+                    ));
+                }
+                if self.field_type == "records" {
+                    FieldType::Records
+                } else {
+                    FieldType::Choice
+                }
+            }
             _ => {
                 return Err(Diagnostic::new(
                     DOCUMENT,
                     format!(
-                        "field `{}` type must be `bits`, `u8`, `u16`, `u32`, `u64`, or `bytes`",
+                        "field `{}` type must be `bits`, `u8`, `u16`, `u32`, `u64`, `sdnv`, `bytes`, `records`, or `choice`",
                         self.name
                     ),
                 ));
@@ -413,6 +660,146 @@ impl SourceField {
                 DOCUMENT,
                 format!("byte field `{}` requires wire_format version 2", self.name),
             ));
+        }
+        if matches!(field_type, FieldType::Sdnv) && version < 3 {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!("SDNV field `{}` requires wire_format version 3", self.name),
+            ));
+        }
+        if (self.length_from.is_some()
+            || self.length_of.is_some()
+            || self.count_from.is_some()
+            || self.count_of.is_some()
+            || self.select_from.is_some())
+            && version < 3
+        {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                "length relationships require wire_format version 3",
+            ));
+        }
+        if self.length_from.is_some() && !matches!(field_type, FieldType::Bytes) {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                "only a byte field may specify `length_from`",
+            ));
+        }
+        if self.length_of.is_some()
+            && matches!(
+                field_type,
+                FieldType::Bytes | FieldType::Bits(_) | FieldType::Records | FieldType::Choice
+            )
+        {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                "a byte or bit field may not specify `length_of`",
+            ));
+        }
+        if self.constant.is_some() && self.length_of.is_some() {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!(
+                    "field `{}` may not specify both `constant` and `length_of`",
+                    self.name
+                ),
+            ));
+        }
+        if self.count_from.is_some() != matches!(field_type, FieldType::Records) {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!(
+                    "record field `{}` requires exactly one `count_from`",
+                    self.name
+                ),
+            ));
+        }
+        if self.message.is_some() != matches!(field_type, FieldType::Records) {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!(
+                    "record field `{}` requires exactly one `message`",
+                    self.name
+                ),
+            ));
+        }
+        if self.count_of.is_some()
+            && !matches!(
+                field_type,
+                FieldType::Bits(_)
+                    | FieldType::U8
+                    | FieldType::U16
+                    | FieldType::U32
+                    | FieldType::U64
+                    | FieldType::Sdnv
+            )
+        {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                "only a scalar field may specify `count_of`",
+            ));
+        }
+        if self.constant.is_some() && self.count_of.is_some() {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!(
+                    "field `{}` may not specify both `constant` and `count_of`",
+                    self.name
+                ),
+            ));
+        }
+        if matches!(field_type, FieldType::Choice) {
+            if self.select_from.is_none() || self.cases.is_empty() {
+                return Err(Diagnostic::new(
+                    DOCUMENT,
+                    format!(
+                        "choice field `{}` requires `select_from` and at least one case",
+                        self.name
+                    ),
+                ));
+            }
+        } else if self.select_from.is_some() || !self.cases.is_empty() {
+            return Err(Diagnostic::new(
+                DOCUMENT,
+                format!("only a choice field may specify `select_from` or `cases`"),
+            ));
+        }
+        if let Some(name) = &self.length_from {
+            validate_identifier(name)?;
+        }
+        if let Some(name) = &self.length_of {
+            validate_identifier(name)?;
+        }
+        if let Some(name) = &self.message {
+            validate_identifier(name)?;
+        }
+        if let Some(name) = &self.count_from {
+            validate_identifier(name)?;
+        }
+        if let Some(name) = &self.count_of {
+            validate_identifier(name)?;
+        }
+        if let Some(name) = &self.select_from {
+            validate_identifier(name)?;
+        }
+        let mut case_values = HashSet::new();
+        let mut cases = Vec::with_capacity(self.cases.len());
+        for case in self.cases {
+            validate_identifier(&case.message)?;
+            if !case_values.insert(case.value) {
+                return Err(Diagnostic::new(
+                    DOCUMENT,
+                    format!(
+                        "choice field `{}` repeats selector value {}",
+                        self.name, case.value
+                    ),
+                ));
+            }
+            cases.push(ChoiceCase {
+                value: case.value,
+                message: case.message,
+                location: DOCUMENT,
+            });
         }
 
         let kind = match self.constant {
@@ -427,6 +814,13 @@ impl SourceField {
             location: DOCUMENT,
             field_type,
             kind,
+            length_from: self.length_from,
+            length_of: self.length_of,
+            message: self.message,
+            count_from: self.count_from,
+            count_of: self.count_of,
+            select_from: self.select_from,
+            cases,
         })
     }
 }
@@ -501,6 +895,9 @@ pub fn ensure_value_fits(value: u64, field_type: FieldType, location: Location) 
             location,
             "a byte field requires an octet array",
         ));
+    }
+    if matches!(field_type, FieldType::Sdnv) {
+        return Ok(());
     }
     let width = field_type.width();
     if width < 64 && value >= (1_u64 << width) {

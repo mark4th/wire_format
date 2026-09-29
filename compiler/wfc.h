@@ -30,8 +30,17 @@ typedef enum {
     WFC_U16,
     WFC_U32,
     WFC_U64,
-    WFC_BYTES
+    WFC_SDNV,
+    WFC_BYTES,
+    WFC_RECORDS,
+    WFC_CHOICE
 } wfc_field_type_t;
+
+typedef struct {
+    uint64_t value;
+    char *message;
+    wfc_location_t location;
+} wfc_choice_case_t;
 
 typedef struct {
     char *name;
@@ -40,6 +49,14 @@ typedef struct {
     uint8_t width;
     int is_constant;
     uint64_t constant;
+    char *length_from;
+    char *length_of;
+    char *message;
+    char *count_from;
+    char *count_of;
+    char *select_from;
+    wfc_choice_case_t *cases;
+    size_t case_count;
 } wfc_field_t;
 
 typedef struct {
@@ -71,6 +88,7 @@ typedef struct {
 } wfc_message_t;
 
 typedef struct {
+    struct json5_value *record_source;
     uint16_t version;
     char *name;
     char *description;
@@ -112,5 +130,8 @@ char *wfc_duplicate(const char *text, size_t length);
 int wfc_identifier_valid(const char *identifier);
 uint8_t wfc_field_width(const wfc_field_t *field);
 int wfc_value_fits(uint64_t value, uint8_t width);
+
+int wfc_records_generate(const wfc_protocol_t *, wfc_generated_t *, wfc_error_t *);
+int wfc_records_check(const wfc_protocol_t *, wfc_summary_t *, wfc_error_t *);
 
 #endif

@@ -1,0 +1,74 @@
+{
+  wire_format: 3,
+  protocol: {
+    name: 'variable-tlv',
+    description: 'Version 3 SDNV and bounded byte-field conformance data',
+    standard: 'wire_format version 3',
+    reference: 'doc/WF_FILE_FORMAT_V3.md',
+    byte_order: 'big-endian',
+    bit_order: 'msb-first',
+    messages: [
+      {
+        name: 'extension',
+        description: 'An SDNV-length TLV followed by a field',
+        fields: [
+          { name: 'tag', type: 'u8' },
+          { name: 'length', type: 'sdnv', length_of: 'value' },
+          { name: 'value', type: 'bytes', length_from: 'length' },
+          { name: 'marker', type: 'u8' },
+        ],
+        vectors: [
+          {
+            name: 'three-octets',
+            values: {
+              tag: 0xc0,
+              value: [0xaa, 0xbb, 0xcc],
+              marker: 0x7f,
+            },
+            wire: [0xc0, 0x03, 0xaa, 0xbb, 0xcc, 0x7f],
+          },
+          {
+            name: 'empty-value',
+            values: { tag: 1, value: [], marker: 2 },
+            wire: [0x01, 0x00, 0x02],
+          },
+        ],
+      },
+      {
+        name: 'sdnv-values',
+        description: 'Published SDNV examples and a 64-bit value',
+        fields: [
+          { name: 'first', type: 'sdnv' },
+          { name: 'second', type: 'sdnv' },
+          { name: 'maximum', type: 'sdnv' },
+        ],
+        vectors: [
+          {
+            name: 'published',
+            values: {
+              first: 0xabc,
+              second: 0x1234,
+              maximum: 0xffffffffffffffff,
+            },
+            wire: [
+              0x95, 0x3c,
+              0xa4, 0x34,
+              0x81, 0xff, 0xff, 0xff, 0xff,
+              0xff, 0xff, 0xff, 0xff, 0x7f,
+            ],
+          },
+        ],
+      },
+      {
+        name: 'constant-sdnv',
+        description: 'A full-width constant SDNV',
+        fields: [
+          { name: 'magic', type: 'sdnv', constant: 0xabc },
+        ],
+        vectors: [
+          { name: 'magic', values: {}, wire: [0x95, 0x3c] },
+        ],
+      },
+    ],
+  },
+}

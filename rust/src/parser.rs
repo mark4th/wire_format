@@ -5,6 +5,102 @@ use crate::ops::{bit_mask, checked_usize, var_index, BinaryOp};
 use crate::param::{Param, Value};
 use crate::{Error, CALL_DEPTH, MAX_FORMATS, MAX_PARAMS, MAX_VARS, STACK_DEPTH};
 
+fn empty_record_lists<'a>() -> [Option<RecordList<'a>>; MAX_PARAMS] {
+    core::array::from_fn(|_| None)
+}
+
+/// One allocation-free row in a version-3 counted record sequence.
+pub struct Record<'a> {
+    values: [i64; MAX_PARAMS],
+    slices: [Option<&'a [u8]>; MAX_PARAMS],
+    record_lists: [Option<RecordList<'a>>; MAX_PARAMS],
+}
+
+impl<'a> Record<'a> {
+    pub fn new() -> Self {
+        Self {
+            values: [0; MAX_PARAMS],
+            slices: [None; MAX_PARAMS],
+            record_lists: empty_record_lists(),
+        }
+    }
+
+    pub fn set_int(&mut self, slot: usize, value: i64) -> Result<(), Error> {
+        let target = self.values.get_mut(slot).ok_or(Error::InvalidParam)?;
+        *target = value;
+        Ok(())
+    }
+
+    pub fn int(&self, slot: usize) -> Option<i64> {
+        self.values.get(slot).copied()
+    }
+
+    pub fn set_slice(&mut self, slot: usize, value: &'a [u8]) -> Result<(), Error> {
+        let target = self.slices.get_mut(slot).ok_or(Error::InvalidParam)?;
+        *target = Some(value);
+        Ok(())
+    }
+
+    pub fn slice(&self, slot: usize) -> Option<&'a [u8]> {
+        self.slices.get(slot).and_then(|value| *value)
+    }
+
+    pub fn set_record_list(&mut self, slot: usize, list: RecordList<'a>) -> Result<(), Error> {
+        let target = self.record_lists.get_mut(slot).ok_or(Error::InvalidParam)?;
+        *target = Some(list);
+        Ok(())
+    }
+
+    pub fn record_list(&self, slot: usize) -> Option<&RecordList<'a>> {
+        self.record_lists.get(slot).and_then(Option::as_ref)
+    }
+}
+
+impl Default for Record<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Caller-owned storage for a sequence of records.
+pub struct RecordList<'a> {
+    records: &'a mut [Record<'a>],
+    count: usize,
+    field_count: usize,
+}
+
+impl<'a> RecordList<'a> {
+    pub fn new(
+        records: &'a mut [Record<'a>],
+        count: usize,
+        field_count: usize,
+    ) -> Result<Self, Error> {
+        if count > records.len() {
+            return Err(Error::RecordCapacity);
+        }
+        if field_count > MAX_PARAMS {
+            return Err(Error::RecordFieldCount);
+        }
+        Ok(Self {
+            records,
+            count,
+            field_count,
+        })
+    }
+
+    pub fn for_decode(records: &'a mut [Record<'a>], field_count: usize) -> Result<Self, Error> {
+        Self::new(records, 0, field_count)
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn records(&self) -> &[Record<'a>] {
+        &self.records[..self.count]
+    }
+}
+
 fn table_depth(formats: &[&str]) -> usize {
     let mut depths = [0usize; MAX_FORMATS];
     let mut deepest = 0usize;
@@ -37,6 +133,7 @@ pub struct WireFormat<'a, 'out> {
     u32s: [Option<&'a [u32]>; MAX_PARAMS],
     vars: [Value; MAX_VARS],
     slices: [Option<&'a [u8]>; MAX_PARAMS],
+    record_lists: [Option<RecordList<'a>>; MAX_PARAMS],
     formats: Option<&'a [&'a str]>,
     out: Option<&'out mut [u8]>,
     out_len: usize,
@@ -61,6 +158,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             u32s: [None; MAX_PARAMS],
             vars: [Value::Int(0); MAX_VARS],
             slices: [None; MAX_PARAMS],
+            record_lists: empty_record_lists(),
             formats: None,
             out: None,
             out_len: 0,
@@ -196,6 +294,45 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         }
 
         Ok(value)
+    }
+
+    fn emit_sdnv(&mut self, value: u64) -> Result<(), Error> {
+        let mut length = 1usize;
+        let mut remaining = value;
+
+        while remaining > 0x7f {
+            remaining >>= 7;
+            length += 1;
+        }
+        let mut index = 0usize;
+        while index < length {
+            let shift = (length - index - 1) * 7;
+            let mut byte = ((value >> shift) & 0x7f) as u8;
+            if index + 1 != length {
+                byte |= 0x80;
+            }
+            self.emit(byte)?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn read_sdnv(&mut self) -> Result<u64, Error> {
+        let mut value = 0u64;
+        let mut index = 0usize;
+
+        while index < 10 {
+            let byte = self.read_byte()?;
+            if value > (u64::MAX >> 7) {
+                return Err(Error::SdnvOverflow);
+            }
+            value = (value << 7) | u64::from(byte & 0x7f);
+            if (byte & 0x80) == 0 {
+                return Ok(value);
+            }
+            index += 1;
+        }
+        Err(Error::SdnvOverflow)
     }
 
     fn set_var(&mut self, name: u8, value: Value) -> Result<(), Error> {
@@ -376,6 +513,35 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         Ok(())
     }
 
+    fn capture_exact(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        let length = checked_usize(self.pop_int()?)?;
+        if slot >= MAX_PARAMS {
+            return Err(Error::InvalidParam);
+        }
+        let input = self.input.ok_or(Error::InputUnavailable)?;
+        let end = self.in_pos.checked_add(length).ok_or(Error::InputEof)?;
+        if end > input.len() {
+            return Err(Error::InputEof);
+        }
+        self.slices[slot] = Some(&input[self.in_pos..end]);
+        self.in_pos = end;
+        Ok(())
+    }
+
+    fn push_slice_length(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        let length = self
+            .slices
+            .get(slot)
+            .and_then(|value| *value)
+            .ok_or(Error::RawUnavailable)?
+            .len();
+        self.push(Value::Int(
+            i64::try_from(length).map_err(|_| Error::ValueOutOfRange)?,
+        ))
+    }
+
     fn emit_slice(&mut self) -> Result<(), Error> {
         let slot = checked_usize(self.pop_int()?)?;
         let values = self
@@ -389,6 +555,151 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             index += 1;
         }
         Ok(())
+    }
+
+    fn emit_exact_slice(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        let length = checked_usize(self.pop_int()?)?;
+        let values = self
+            .slices
+            .get(slot)
+            .and_then(|value| *value)
+            .ok_or(Error::RawUnavailable)?;
+        if values.len() != length {
+            return Err(Error::RawLength);
+        }
+        let mut index = 0usize;
+        while index < values.len() {
+            self.emit(values[index])?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn push_record_count(&mut self) -> Result<(), Error> {
+        let slot = checked_usize(self.pop_int()?)?;
+        let count = self
+            .record_lists
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or(Error::RecordUnavailable)?
+            .count;
+        self.push(Value::Int(
+            i64::try_from(count).map_err(|_| Error::ValueOutOfRange)?,
+        ))
+    }
+
+    fn process_records(
+        &mut self,
+        format_index: usize,
+        current_index: usize,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let field_count = checked_usize(self.pop_int()?)?;
+        let slot = checked_usize(self.pop_int()?)?;
+        let count = checked_usize(self.pop_int()?)?;
+        if slot >= MAX_PARAMS {
+            return Err(Error::InvalidParam);
+        }
+        if field_count > MAX_PARAMS {
+            return Err(Error::RecordFieldCount);
+        }
+        if format_index >= current_index || depth >= CALL_DEPTH {
+            return Err(Error::FormatCallDepth);
+        }
+        let formats = self.formats.unwrap_or(&[]);
+        let child_format = *formats.get(format_index).ok_or(Error::RecordUnavailable)?;
+
+        let mut parent_lists = empty_record_lists();
+        core::mem::swap(&mut parent_lists, &mut self.record_lists);
+        let mut list = match parent_lists[slot].take() {
+            Some(list) => list,
+            None => {
+                self.record_lists = parent_lists;
+                return Err(Error::RecordUnavailable);
+            }
+        };
+        if list.field_count != field_count || count > list.records.len() {
+            let error = if count > list.records.len() {
+                Error::RecordCapacity
+            } else {
+                Error::RecordFieldCount
+            };
+            parent_lists[slot] = Some(list);
+            self.record_lists = parent_lists;
+            return Err(error);
+        }
+        if self.out.is_some() && count != list.count {
+            parent_lists[slot] = Some(list);
+            self.record_lists = parent_lists;
+            return Err(Error::RecordCapacity);
+        }
+        if self.input.is_some() {
+            list.count = count;
+        }
+
+        let saved_stack = self.stack;
+        let saved_sp = self.sp;
+        let saved_params = self.params;
+        let saved_raw = self.raw;
+        let saved_u16s = self.u16s;
+        let saved_u32s = self.u32s;
+        let saved_vars = self.vars;
+        let saved_slices = self.slices;
+        let encoding = self.out.is_some();
+        let mut row_index = 0usize;
+        let mut result = Ok(());
+
+        while row_index < count {
+            let row = &mut list.records[row_index];
+            self.stack = [Value::Int(0); STACK_DEPTH];
+            self.sp = 0;
+            self.params = core::array::from_fn(|index| Value::Int(row.values[index]));
+            self.raw = [None; MAX_PARAMS];
+            self.u16s = [None; MAX_PARAMS];
+            self.u32s = [None; MAX_PARAMS];
+            self.vars = [Value::Int(0); MAX_VARS];
+            self.slices = if encoding {
+                row.slices
+            } else {
+                [None; MAX_PARAMS]
+            };
+            core::mem::swap(&mut self.record_lists, &mut row.record_lists);
+
+            result = self.execute(child_format, format_index, depth + 1);
+
+            core::mem::swap(&mut self.record_lists, &mut row.record_lists);
+            if !encoding {
+                let mut field_index = 0usize;
+                while field_index < field_count {
+                    row.values[field_index] = match self.vars[field_index] {
+                        Value::Int(value) => value,
+                        _ => {
+                            result = Err(Error::TypeMismatch);
+                            0
+                        }
+                    };
+                    row.slices[field_index] = self.slices[field_index];
+                    field_index += 1;
+                }
+            }
+            if result.is_err() {
+                break;
+            }
+            row_index += 1;
+        }
+
+        self.stack = saved_stack;
+        self.sp = saved_sp;
+        self.params = saved_params;
+        self.raw = saved_raw;
+        self.u16s = saved_u16s;
+        self.u32s = saved_u32s;
+        self.vars = saved_vars;
+        self.slices = saved_slices;
+        self.record_lists = parent_lists;
+        self.record_lists[slot] = Some(list);
+        result
     }
 
     fn encode_bit_field(&mut self) -> Result<(), Error> {
@@ -456,9 +767,17 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                 let raw = self.pop_int()?;
                 self.emit_be_u64(raw as u64)
             }
+            b'd' => {
+                let raw = self.pop_int()?;
+                self.emit_sdnv(raw as u64)
+            }
             b'r' => self.emit_array(fmt, pos),
             b'R' => self.capture_remaining(),
+            b'N' => self.capture_exact(),
+            b'z' => self.push_slice_length(),
             b'v' => self.emit_slice(),
+            b'V' => self.emit_exact_slice(),
+            b'k' => self.push_record_count(),
             b'B' => {
                 let value = self.read_byte()?;
                 self.push(Value::Int(value as i64))
@@ -473,6 +792,10 @@ impl<'a, 'out> WireFormat<'a, 'out> {
             }
             b'Q' => {
                 let value = self.read_be_u64()?;
+                self.push(Value::Int(value as i64))
+            }
+            b'D' => {
+                let value = self.read_sdnv()?;
                 self.push(Value::Int(value as i64))
             }
             b'x' => self.encode_bit_field(),
@@ -539,12 +862,10 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         Ok(())
     }
 
-    pub fn parse(&mut self, fmt: &str) -> Result<usize, Error> {
-        self.out_len = 0;
-        self.faults = 0;
+    fn execute(&mut self, fmt: &str, initial_index: usize, depth: usize) -> Result<(), Error> {
         let formats = self.formats.unwrap_or(&[]);
         let mut current = fmt.as_bytes();
-        let mut current_index = formats.len();
+        let mut current_index = initial_index;
         let mut pos = 0usize;
         let mut pending = 1i64;
         let mut return_formats: [Option<&[u8]>; CALL_DEPTH] = [None; CALL_DEPTH];
@@ -616,11 +937,29 @@ impl<'a, 'out> WireFormat<'a, 'out> {
                     continue;
                 }
 
+                if op == b'J' {
+                    if current.get(pos) == Some(&b'[') {
+                        pos += 1;
+                    }
+                    let called_index =
+                        read_call_index(current, &mut pos).ok_or(Error::RecordUnavailable)?;
+                    self.process_records(called_index, current_index, depth)?;
+                    continue;
+                }
+
                 self.apply_op(op, current, &mut pos)?;
             } else {
                 self.emit(byte)?;
             }
         }
+        Ok(())
+    }
+
+    pub fn parse(&mut self, fmt: &str) -> Result<usize, Error> {
+        self.out_len = 0;
+        self.faults = 0;
+        let initial_index = self.formats.unwrap_or(&[]).len();
+        self.execute(fmt, initial_index, 0)?;
         Ok(self.out_len)
     }
 
@@ -628,13 +967,23 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         self.abort_mask = mask;
     }
 
-    /// Attaches a zero-copy version-2 byte field to a caller-field slot.
+    /// Attaches a zero-copy byte field to a caller-field slot.
     pub fn set_slice(&mut self, slot: usize, bytes: &'a [u8]) -> Result<(), Error> {
         if slot >= MAX_PARAMS {
             return Err(Error::InvalidParam);
         }
         self.slices[slot] = Some(bytes);
         Ok(())
+    }
+
+    pub fn set_record_list(&mut self, slot: usize, list: RecordList<'a>) -> Result<(), Error> {
+        let target = self.record_lists.get_mut(slot).ok_or(Error::InvalidParam)?;
+        *target = Some(list);
+        Ok(())
+    }
+
+    pub fn record_list(&self, slot: usize) -> Option<&RecordList<'a>> {
+        self.record_lists.get(slot).and_then(Option::as_ref)
     }
 
     pub fn abort_mask(&self) -> u32 {
@@ -667,7 +1016,7 @@ impl<'a, 'out> WireFormat<'a, 'out> {
         }
     }
 
-    /// Returns a zero-copy byte field captured by `%R`.
+    /// Returns a zero-copy byte field captured by `%R` or `%N`.
     pub fn slice(&self, slot: usize) -> Option<&'a [u8]> {
         self.slices.get(slot).and_then(|value| *value)
     }

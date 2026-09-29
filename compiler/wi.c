@@ -39,6 +39,7 @@ typedef struct {
     uint8_t *widths;
     uint8_t *swaps;
     size_t value_count;
+    int variable;
 } compiled_message_t;
 
 typedef struct {
@@ -173,14 +174,28 @@ static int compile_scalar(const wfc_field_t *field, size_t supplied_index,
     uint8_t octets = wfc_field_width(field) / 8;
     uint8_t index;
 
+    if (field->type == WFC_SDNV) {
+        if (supplied) {
+            return string_printf(encode, "%%p{%zu}%%d", supplied_index + 1) &&
+                   string_printf(decode, "%%D%%P%c",
+                                 (char)('a' + supplied_index));
+        }
+        return push_literal(encode, field->constant) &&
+               string_append(encode, "%d") && string_append(decode, "%D") &&
+               append_constant_check(decode, field->constant);
+    }
+
     if (supplied) {
         switch (field->type) {
         case WFC_U8: encode_op = "%b"; decode_op = "%B"; break;
         case WFC_U16: encode_op = "%w"; decode_op = "%S"; break;
         case WFC_U32: encode_op = "%W"; decode_op = "%L"; break;
         case WFC_U64: encode_op = "%q"; decode_op = "%Q"; break;
+        case WFC_SDNV: return 0;
         case WFC_BITS:
-        case WFC_BYTES: return 0;
+        case WFC_BYTES:
+        case WFC_RECORDS:
+        case WFC_CHOICE: return 0;
         }
         return string_printf(encode, "%%p{%zu}%s", supplied_index + 1, encode_op) &&
                string_printf(decode, "%s%%P%c", decode_op,
@@ -278,11 +293,173 @@ static uint8_t scalar_swap(const wfc_field_t *field, wfc_byte_order_t order)
     case WFC_U16: return 2;
     case WFC_U32: return 4;
     case WFC_U64: return 8;
+    case WFC_SDNV: return 0;
     case WFC_BITS:
     case WFC_BYTES:
+    case WFC_RECORDS:
+    case WFC_CHOICE:
     case WFC_U8: return 0;
     }
     return 0;
+}
+
+static size_t field_position(const wfc_message_t *message, const char *name)
+{
+    size_t index;
+
+    for (index = 0; index < message->field_count; index++) {
+        if (strcmp(message->fields[index].name, name) == 0)
+            return index;
+    }
+    return SIZE_MAX;
+}
+
+static size_t message_position(const wfc_protocol_t *protocol, const char *name)
+{
+    size_t index;
+
+    for (index = 0; index < protocol->message_count; index++) {
+        if (strcmp(protocol->messages[index].name, name) == 0)
+            return index;
+    }
+    return SIZE_MAX;
+}
+
+static size_t caller_field_count(const wfc_message_t *message)
+{
+    size_t index;
+    size_t count = 0;
+
+    for (index = 0; index < message->field_count; index++) {
+        const wfc_field_t *field = &message->fields[index];
+        if (!field->is_constant && field->length_of == NULL &&
+            field->count_of == NULL)
+            count++;
+    }
+    return count;
+}
+
+static int compile_derived_length(const wfc_field_t *field,
+                                  size_t slice_slot, size_t variable,
+                                  string_t *encode, string_t *decode)
+{
+    const char *encode_op = NULL;
+    const char *decode_op = NULL;
+
+    switch (field->type) {
+    case WFC_U8: encode_op = "%b"; decode_op = "%B"; break;
+    case WFC_U16: encode_op = "%w"; decode_op = "%S"; break;
+    case WFC_U32: encode_op = "%W"; decode_op = "%L"; break;
+    case WFC_U64: encode_op = "%q"; decode_op = "%Q"; break;
+    case WFC_SDNV: encode_op = "%d"; decode_op = "%D"; break;
+    case WFC_BITS:
+    case WFC_BYTES:
+    case WFC_RECORDS:
+    case WFC_CHOICE:
+        return 0;
+    }
+    return string_printf(encode, "%%{%zu}%%z%s", slice_slot, encode_op) &&
+           string_printf(decode, "%s%%P%c", decode_op,
+                         (char)('a' + variable));
+}
+
+static int compile_derived_bits(const wfc_field_t *field, size_t bit_offset,
+                                const char *source, size_t variable,
+                                wfc_bit_order_t bit_order,
+                                string_t *encode, string_t *decode)
+{
+    uint8_t width = field->width;
+    uint8_t consumed = 0;
+    size_t cursor = bit_offset;
+    int first_fragment = 1;
+
+    while (consumed < width) {
+        size_t within = cursor % 8;
+        uint8_t remaining = width - consumed;
+        uint8_t chunk = (uint8_t)((8 - within) < remaining
+                                      ? (8 - within) : remaining);
+        uint8_t source_shift;
+        uint8_t position;
+        uint64_t mask = bit_mask(chunk);
+
+        if (bit_order == WFC_MSB_FIRST) {
+            source_shift = width - consumed - chunk;
+            position = (uint8_t)(8 - within - chunk);
+        } else {
+            source_shift = consumed;
+            position = (uint8_t)within;
+        }
+        if (!string_append(encode, source))
+            return 0;
+        if (source_shift != 0 &&
+            (!push_literal(encode, UINT64_C(1) << source_shift) ||
+             !string_append(encode, "%/")))
+            return 0;
+        if (!push_literal(encode, mask) || !string_append(encode, "%&") ||
+            !append_bit_operation(encode, chunk, position, 'x'))
+            return 0;
+
+        if (!first_fragment && bit_order == WFC_MSB_FIRST &&
+            (!push_literal(decode, UINT64_C(1) << chunk) ||
+             !string_append(decode, "%*")))
+            return 0;
+        if (!append_bit_operation(decode, chunk, position, 'X'))
+            return 0;
+        if (!first_fragment) {
+            if (bit_order == WFC_LSB_FIRST &&
+                (!push_literal(decode, UINT64_C(1) << consumed) ||
+                 !string_append(decode, "%*")))
+                return 0;
+            if (!string_append(decode, "%+"))
+                return 0;
+        }
+        consumed += chunk;
+        cursor += chunk;
+        first_fragment = 0;
+        if (cursor % 8 == 0 &&
+            (!string_append(encode, "%f") || !string_append(decode, "%f")))
+            return 0;
+    }
+    return string_printf(decode, "%%P%c", (char)('a' + variable));
+}
+
+static int compile_derived_count(const wfc_field_t *field, size_t bit_offset,
+                                 size_t record_slot, size_t variable,
+                                 wfc_bit_order_t bit_order,
+                                 string_t *encode, string_t *decode)
+{
+    string_t source = {0};
+    const char *encode_op = NULL;
+    const char *decode_op = NULL;
+    int success;
+
+    if (!string_printf(&source, "%%{%zu}%%k", record_slot))
+        return 0;
+    if (field->type == WFC_BITS) {
+        success = compile_derived_bits(field, bit_offset, source.data, variable,
+                                       bit_order, encode, decode);
+        free(source.data);
+        return success;
+    }
+    switch (field->type) {
+    case WFC_U8: encode_op = "%b"; decode_op = "%B"; break;
+    case WFC_U16: encode_op = "%w"; decode_op = "%S"; break;
+    case WFC_U32: encode_op = "%W"; decode_op = "%L"; break;
+    case WFC_U64: encode_op = "%q"; decode_op = "%Q"; break;
+    case WFC_SDNV: encode_op = "%d"; decode_op = "%D"; break;
+    case WFC_BITS:
+    case WFC_BYTES:
+    case WFC_RECORDS:
+    case WFC_CHOICE:
+        free(source.data);
+        return 0;
+    }
+    success = string_append(encode, source.data) &&
+              string_append(encode, encode_op) &&
+              string_printf(decode, "%s%%P%c", decode_op,
+                            (char)('a' + variable));
+    free(source.data);
+    return success;
 }
 
 static int compile_message(const wfc_protocol_t *protocol,
@@ -291,6 +468,9 @@ static int compile_message(const wfc_protocol_t *protocol,
 {
     size_t bit_offset = 0;
     size_t field_index;
+    size_t next_variable;
+    size_t *ordinals = NULL;
+    size_t *variables = NULL;
     string_t encode = {0};
     string_t decode = {0};
 
@@ -300,17 +480,26 @@ static int compile_message(const wfc_protocol_t *protocol,
     compiled->value_fields = calloc(message->field_count, sizeof(*compiled->value_fields));
     compiled->widths = malloc(message->field_count == 0 ? 1 : message->field_count);
     compiled->swaps = malloc(message->field_count == 0 ? 1 : message->field_count);
+    ordinals = malloc(message->field_count * sizeof(*ordinals));
+    variables = malloc(message->field_count * sizeof(*variables));
     if (compiled->offsets == NULL || compiled->value_fields == NULL ||
-        compiled->widths == NULL || compiled->swaps == NULL) {
+        compiled->widths == NULL || compiled->swaps == NULL ||
+        ordinals == NULL || variables == NULL) {
         wfc_set_error(error, message->location, "out of memory");
         goto fail;
     }
 
     for (field_index = 0; field_index < message->field_count; field_index++) {
         const wfc_field_t *field = &message->fields[field_index];
-        size_t supplied_index = compiled->value_count;
-        int supplied = !field->is_constant;
-        compiled->offsets[field_index] = bit_offset;
+        int supplied = !field->is_constant && field->length_of == NULL &&
+                       field->count_of == NULL;
+
+        if (field->type == WFC_BYTES || field->type == WFC_SDNV ||
+            field->type == WFC_RECORDS || field->type == WFC_CHOICE)
+            compiled->variable = 1;
+
+        ordinals[field_index] = SIZE_MAX;
+        variables[field_index] = SIZE_MAX;
         if (supplied) {
             if (compiled->value_count == WI_MAX_CALLER_FIELDS) {
                 wfc_set_error(error, message->location,
@@ -324,22 +513,124 @@ static int compile_message(const wfc_protocol_t *protocol,
                               field->name);
                 goto fail;
             }
+            ordinals[field_index] = compiled->value_count;
             compiled->value_fields[compiled->value_count] = field;
             compiled->widths[compiled->value_count] = wfc_field_width(field);
             compiled->swaps[compiled->value_count] = scalar_swap(field, protocol->byte_order);
             compiled->value_count++;
         }
-        if (field->type == WFC_BITS) {
+    }
+    next_variable = compiled->value_count;
+    for (field_index = 0; field_index < message->field_count; field_index++) {
+        const wfc_field_t *field = &message->fields[field_index];
+
+        if (field->is_constant || field->type == WFC_BYTES ||
+            field->type == WFC_RECORDS || field->type == WFC_CHOICE)
+            continue;
+        if (field->length_of == NULL && field->count_of == NULL) {
+            variables[field_index] = ordinals[field_index];
+        } else {
+            if (next_variable >= 26) {
+                wfc_set_error(error, field->location,
+                              "message `%s` needs more than 26 decode variables",
+                              message->name);
+                goto fail;
+            }
+            variables[field_index] = next_variable++;
+        }
+    }
+
+    for (field_index = 0; field_index < message->field_count; field_index++) {
+        const wfc_field_t *field = &message->fields[field_index];
+        size_t supplied_index = ordinals[field_index];
+        int supplied = supplied_index != SIZE_MAX;
+
+        compiled->offsets[field_index] = bit_offset;
+        if (field->count_of != NULL) {
+            size_t target_index = field_position(message, field->count_of);
+            size_t target_slot = ordinals[target_index];
+
+            if (!compile_derived_count(field, bit_offset, target_slot,
+                                       variables[field_index],
+                                       protocol->bit_order, &encode, &decode)) {
+                wfc_set_error(error, field->location, "out of memory");
+                goto fail;
+            }
+        } else if (field->type == WFC_BITS) {
             if (!compile_bits(field, bit_offset, supplied_index, supplied,
                               protocol->bit_order, &encode, &decode)) {
                 wfc_set_error(error, field->location, "out of memory");
                 goto fail;
             }
         } else if (field->type == WFC_BYTES) {
-            if (!string_printf(&encode, "%%{%zu}%%v", supplied_index) ||
-                !string_printf(&decode, "%%{%zu}%%R", supplied_index)) {
+            if (field->length_from == NULL) {
+                if (!string_printf(&encode, "%%{%zu}%%v", supplied_index) ||
+                    !string_printf(&decode, "%%{%zu}%%R", supplied_index)) {
+                    wfc_set_error(error, field->location, "out of memory");
+                    goto fail;
+                }
+            } else {
+                size_t length_index = field_position(message,
+                                                     field->length_from);
+                if (!string_printf(&encode, "%%{%zu}%%z%%{%zu}%%V",
+                                   supplied_index, supplied_index) ||
+                    !string_printf(&decode, "%%g%c%%{%zu}%%N",
+                                   (char)('a' + variables[length_index]),
+                                   supplied_index)) {
+                    wfc_set_error(error, field->location, "out of memory");
+                    goto fail;
+                }
+            }
+        } else if (field->length_of != NULL) {
+            size_t target_index = field_position(message, field->length_of);
+            size_t target_slot = ordinals[target_index];
+
+            if (!compile_derived_length(field, target_slot,
+                                        variables[field_index],
+                                        &encode, &decode)) {
                 wfc_set_error(error, field->location, "out of memory");
                 goto fail;
+            }
+        } else if (field->type == WFC_RECORDS) {
+            size_t child_index = message_position(protocol, field->message);
+            size_t count_index = field_position(message, field->count_from);
+            size_t child_fields = caller_field_count(
+                &protocol->messages[child_index]);
+
+            if (!string_printf(&encode,
+                               "%%{%zu}%%k%%{%zu}%%{%zu}%%J[%zu]",
+                               supplied_index, supplied_index,
+                               child_fields, child_index) ||
+                !string_printf(&decode,
+                               "%%g%c%%{%zu}%%{%zu}%%J[%zu]",
+                               (char)('a' + variables[count_index]),
+                               supplied_index, child_fields, child_index)) {
+                wfc_set_error(error, field->location, "out of memory");
+                goto fail;
+            }
+        } else if (field->type == WFC_CHOICE) {
+            size_t selector_index = field_position(message, field->select_from);
+            size_t case_index;
+
+            for (case_index = 0; case_index < field->case_count; case_index++) {
+                size_t child_index = message_position(
+                    protocol, field->cases[case_index].message);
+                size_t child_fields = caller_field_count(
+                    &protocol->messages[child_index]);
+
+                if (!string_printf(&encode,
+                                   "%%?%%p{%zu}%%{%llu}%%=%%t%%{1}%%{%zu}%%{%zu}%%J[%zu]%%;",
+                                   ordinals[selector_index] + 1,
+                                   (unsigned long long)field->cases[case_index].value,
+                                   supplied_index, child_fields, child_index) ||
+                    !string_printf(&decode,
+                                   "%%?%%g%c%%{%llu}%%=%%t%%{1}%%{%zu}%%{%zu}%%J[%zu]%%;",
+                                   (char)('a' + variables[selector_index]),
+                                   (unsigned long long)field->cases[case_index].value,
+                                   supplied_index, child_fields, child_index)) {
+                    wfc_set_error(error, field->location, "out of memory");
+                    goto fail;
+                }
             }
         } else if (!compile_scalar(field, supplied_index, supplied,
                                    protocol->byte_order, &encode, &decode)) {
@@ -355,6 +646,8 @@ static int compile_message(const wfc_protocol_t *protocol,
         wfc_set_error(error, message->location, "out of memory");
         goto fail;
     }
+    free(ordinals);
+    free(variables);
     return 1;
 
 fail:
@@ -364,6 +657,8 @@ fail:
     free(compiled->value_fields);
     free(compiled->widths);
     free(compiled->swaps);
+    free(ordinals);
+    free(variables);
     memset(compiled, 0, sizeof(*compiled));
     return 0;
 }
@@ -621,8 +916,7 @@ static int build_image(const wfc_protocol_t *protocol,
             !put_u32(&output, (uint32_t)item->value_count) ||
             !put_u32(&output, record->widths_offset) ||
             !put_u32(&output, record->swaps_offset) ||
-            !put_u32(&output,
-                     item->message->fields[item->message->field_count - 1].type == WFC_BYTES) ||
+            !put_u32(&output, (uint32_t)item->variable) ||
             !put_u32(&output, 0)) {
             wfc_set_error(error, item->message->location, "out of memory");
             goto done;
@@ -820,7 +1114,9 @@ static int generate_header(const wfc_protocol_t *protocol,
         }
         for (field_index = 0; field_index < item->message->field_count; field_index++) {
             char *field;
-            if (item->message->fields[field_index].is_constant)
+            if (item->message->fields[field_index].is_constant ||
+                item->message->fields[field_index].length_of != NULL ||
+                item->message->fields[field_index].count_of != NULL)
                 continue;
             field = c_name(item->message->fields[field_index].name);
             if (field == NULL) {
@@ -846,8 +1142,7 @@ static int generate_header(const wfc_protocol_t *protocol,
         }
         name.length = 0; if (name.data != NULL) name.data[0] = 0;
         if (!string_printf(&name, "%s_VARIABLE_WIRE_SIZE", base.data) ||
-            !header_define(&header, name.data,
-                           item->message->fields[item->message->field_count - 1].type == WFC_BYTES) ||
+            !header_define(&header, name.data, (uint32_t)item->variable) ||
             !string_append(&header, "\n")) {
             free(message); free(base.data); free(name.data); goto done;
         }
@@ -879,6 +1174,7 @@ int wfc_generate(const wfc_protocol_t *protocol, wfc_generated_t *generated,
     size_t index;
     int success = 0;
 
+    if (protocol->version == 4) { return wfc_records_generate(protocol, generated, error); }
     memset(generated, 0, sizeof(*generated));
     memset(&image, 0, sizeof(image));
     compiled = calloc(protocol->message_count, sizeof(*compiled));

@@ -28,6 +28,7 @@ the application and its protocol engine.
 Version 1 describes fixed-size records.
 The compatible variable-byte-tail extension is documented separately in
 [WF_FILE_FORMAT_V2.md](WF_FILE_FORMAT_V2.md).
+Version 3 is specified in [WF_FILE_FORMAT_V3.md](WF_FILE_FORMAT_V3.md).
 
 ## Complete example
 
@@ -293,3 +294,9 @@ Version 1 has no:
 These omissions keep the first format small and explicit. An incompatible
 source extension requires a new `wire_format` version so an older compiler
 rejects it instead of compiling a different record.
+
+## Named-record source extension
+
+The C `wfc` also accepts `wire_format: 4` `.wf` definitions with expressions,
+conditions and named nested records. These compile to runtime format strings
+in `.wi`, documented in [the version 4 guide](WIRE_INFO_V4.md).

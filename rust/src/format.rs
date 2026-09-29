@@ -66,6 +66,10 @@ pub(crate) fn next_call(fmt: &[u8], pos: &mut usize) -> Option<usize> {
         if op == b'[' {
             return read_call_index(fmt, pos);
         }
+        if op == b'J' && *pos < fmt.len() && fmt[*pos] == b'[' {
+            *pos += 1;
+            return read_call_index(fmt, pos);
+        }
     }
 
     None

@@ -1,4 +1,4 @@
-use crate::{Error, Param, WireFormat};
+use crate::{Error, Param, Record, RecordList, WireFormat};
 
 #[test]
 fn encodes_dns_header() {
@@ -70,6 +70,81 @@ fn emits_version_two_slice_slot() {
     wf.set_slice(2, &bytes).unwrap();
     wf.parse("%{2}%v").unwrap();
     assert_eq!(wf.output(), &bytes);
+}
+
+#[test]
+fn encodes_and_decodes_sdnv_bounded_slices() {
+    let bytes = [0xde, 0xad, 0xbe];
+    let expected = [0x95, 0x3c, 0x03, 0xde, 0xad, 0xbe, 0x7f];
+    let mut output = [0u8; 16];
+    let params = [Param::from(0xabcu64)];
+    let mut enc = WireFormat::new_encode(&mut output, &params);
+    enc.set_slice(1, &bytes).unwrap();
+    enc.parse("%p1%d%{1}%z%d%{1}%z%{1}%V%{127}%b").unwrap();
+    assert_eq!(enc.output(), &expected);
+
+    let mut dec = WireFormat::new_decode(&expected, &[]);
+    dec.parse("%D%Pa%D%Pb%gb%{1}%N%B%Pc").unwrap();
+    assert_eq!(dec.int_var(b'a'), Some(0xabc));
+    assert_eq!(dec.int_var(b'b'), Some(3));
+    assert_eq!(dec.slice(1), Some(bytes.as_slice()));
+    assert_eq!(dec.int_var(b'c'), Some(0x7f));
+}
+
+#[test]
+fn encodes_and_decodes_counted_records() {
+    let encode_formats = ["%p1%b%p2%d"];
+    let mut encode_rows = [Record::new(), Record::new()];
+    encode_rows[0].set_int(0, 0x11).unwrap();
+    encode_rows[0].set_int(1, 1).unwrap();
+    encode_rows[1].set_int(0, 0x22).unwrap();
+    encode_rows[1].set_int(1, 0xabc).unwrap();
+    let encode_list = RecordList::new(&mut encode_rows, 2, 2).unwrap();
+    let mut output = [0u8; 16];
+    let mut enc = WireFormat::new_encode(&mut output, &[]);
+    enc.set_formats(&encode_formats).unwrap();
+    enc.set_record_list(0, encode_list).unwrap();
+    enc.parse("%{0}%k%d%{0}%k%{0}%{2}%J[0]%{238}%b").unwrap();
+    assert_eq!(enc.output(), &[2, 0x11, 1, 0x22, 0x95, 0x3c, 0xee]);
+
+    let decode_formats = ["%B%Pa%D%Pb"];
+    let mut decode_rows = [Record::new(), Record::new()];
+    let decode_list = RecordList::for_decode(&mut decode_rows, 2).unwrap();
+    let mut dec = WireFormat::new_decode(enc.output(), &[]);
+    dec.set_formats(&decode_formats).unwrap();
+    dec.set_record_list(0, decode_list).unwrap();
+    dec.parse("%D%Pa%ga%{0}%{2}%J[0]%B%Pb").unwrap();
+    let decoded = dec.record_list(0).unwrap();
+    assert_eq!(decoded.count(), 2);
+    assert_eq!(decoded.records()[0].int(0), Some(0x11));
+    assert_eq!(decoded.records()[1].int(1), Some(0xabc));
+    assert_eq!(dec.int_var(b'b'), Some(0xee));
+}
+
+#[test]
+fn counted_records_can_nest_through_a_choice() {
+    let formats = [
+        "%p1%d%p2%d",
+        "%p1%d%{1}%k%d%{1}%k%{1}%{2}%J[0]",
+        "%p1%b%?%p1%{8}%=%t%{1}%{1}%{2}%J[1]%;",
+    ];
+    let mut claim_rows = [Record::new(), Record::new()];
+    claim_rows[0].set_int(0, 0).unwrap();
+    claim_rows[0].set_int(1, 5).unwrap();
+    claim_rows[1].set_int(0, 5).unwrap();
+    claim_rows[1].set_int(1, 7).unwrap();
+    let claims = RecordList::new(&mut claim_rows, 2, 2).unwrap();
+    let mut body_rows = [Record::new()];
+    body_rows[0].set_int(0, 3).unwrap();
+    body_rows[0].set_record_list(1, claims).unwrap();
+    let body = RecordList::new(&mut body_rows, 1, 2).unwrap();
+    let params = [Param::from(8u8)];
+    let mut output = [0u8; 16];
+    let mut enc = WireFormat::new_encode(&mut output, &params);
+    enc.set_formats(&formats).unwrap();
+    enc.set_record_list(1, body).unwrap();
+    enc.parse(formats[2]).unwrap();
+    assert_eq!(enc.output(), &[8, 3, 2, 0, 5, 5, 7]);
 }
 
 #[test]

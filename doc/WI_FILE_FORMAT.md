@@ -194,3 +194,22 @@ The wire-size entry at offset 8 is then the fixed-prefix/minimum size.
 The byte field has a zero width-table entry and uses its ordinary caller-field
 ordinal as a slice slot. Its encode program contains `%v`; its decode program
 contains `%R`. All other reserved bits and fields remain zero.
+
+## Version 3 additions
+
+Version 3 retains the same header and message-record layout. A message record's
+variable-size flag is set when any field is `sdnv`, `bytes`, `records`, or
+`choice`; the wire-size entry is the fixed/minimum size.
+
+SDNV fields compile to `%d`/`%D`. Reciprocal `length_of`/`length_from`
+relationships compile to `%z`, `%V`, and `%N`. Reciprocal
+`count_of`/`count_from` relationships use `%k` and `%J[n]` over caller-owned
+record lists. Selector-driven choices compile to conditionals containing one
+`%J[n]` call for each declared case. These additions change format programs
+and runtime inputs, but do not add binary sections or change record offsets.
+
+## Named-record extension
+
+Version 4 keeps the header, message rows and encode/decode string slots and
+adds field metadata plus named operands for the same runtime interpreter.
+See [the version 4 guide](WIRE_INFO_V4.md).

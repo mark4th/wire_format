@@ -286,6 +286,64 @@ int main(void)
         ck("slice decode bytes", memcmp(v.slices[2].data, tail, sizeof tail), 0);
     }
 
+    // ---- version 3 SDNV and bounded slices -------------------------
+    printf("VERSION 3 SDNV / BOUNDED SLICES\n");
+    {
+        static const uint8_t value[] = { 0xde, 0xad, 0xbe };
+        static const uint8_t input[] = {
+            0x95, 0x3c, 0x03, 0xde, 0xad, 0xbe, 0x7f
+        };
+
+        p[0] = 0xabc;
+        wi_init(&v, buf, sizeof buf, p, 1);
+        ck("set bounded slice", wi_set_slice(&v, 1, value, sizeof value), 0);
+        n = wi_parse(&v, "%p1%d%{1}%z%d%{1}%z%{1}%V%{127}%b");
+        ck("bounded encode length", n, sizeof input);
+        ck("bounded encode bytes", memcmp(buf, input, sizeof input), 0);
+
+        wi_decode_init(&v, input, sizeof input, NULL, 0);
+        wi_parse(&v, "%D%Pa%D%Pb%gb%{1}%N%B%Pc");
+        ck("SDNV value", v.vars[0], 0xabc);
+        ck("SDNV length", v.vars[1], sizeof value);
+        ck("bounded decode length", v.slices[1].length, sizeof value);
+        ck("bounded decode bytes", memcmp(v.slices[1].data, value, sizeof value), 0);
+        ck("trailing byte remains parseable", v.vars[2], 0x7f);
+    }
+
+    // ---- version 3 counted record sequences -----------------------
+    printf("VERSION 3 COUNTED RECORDS\n");
+    {
+        static const char child_encode[] = "%p1%b%p2%d";
+        static const char child_decode[] = "%B%Pa%D%Pb";
+        static const char *encode_formats[] = { child_encode };
+        static const char *decode_formats[] = { child_decode };
+        static const uint8_t expected[] = { 2, 0x11, 1, 0x22, 0x95, 0x3c, 0xee };
+        wi_record_t encode_rows[2] = {0};
+        wi_record_t decode_rows[2] = {0};
+        wi_record_list_t encode_list = { encode_rows, 2, 2, 2 };
+        wi_record_list_t decode_list = { decode_rows, 0, 2, 2 };
+
+        encode_rows[0].values[0] = 0x11;
+        encode_rows[0].values[1] = 1;
+        encode_rows[1].values[0] = 0x22;
+        encode_rows[1].values[1] = 0xabc;
+        wi_init(&v, buf, sizeof buf, NULL, 0);
+        ck("set record encode formats", wi_set_formats(&v, encode_formats, 1), 0);
+        ck("set encode record list", wi_set_record_list(&v, 0, &encode_list), 0);
+        n = wi_parse(&v, "%{0}%k%d%{0}%k%{0}%{2}%J[0]%{238}%b");
+        ck("record encode length", n, sizeof expected);
+        ck("record encode bytes", memcmp(buf, expected, sizeof expected), 0);
+
+        wi_decode_init(&v, expected, sizeof expected, NULL, 0);
+        ck("set record decode formats", wi_set_formats(&v, decode_formats, 1), 0);
+        ck("set decode record list", wi_set_record_list(&v, 0, &decode_list), 0);
+        wi_parse(&v, "%D%Pa%ga%{0}%{2}%J[0]%B%Pb");
+        ck("record decode count", decode_list.count, 2);
+        ck("record zero scalar", decode_rows[0].values[0], 0x11);
+        ck("record one SDNV", decode_rows[1].values[1], 0xabc);
+        ck("record trailing byte", v.vars[1], 0xee);
+    }
+
     printf("\n%s\n", fails ? "*** FAILURES ***" : "%[n], %: and %rN work");
     return fails != 0;
 }

@@ -21,7 +21,7 @@ mod parser;
 
 pub use error::Error;
 pub use param::Param;
-pub use parser::WireFormat;
+pub use parser::{Record, RecordList, WireFormat};
 
 /// Maximum depth of the RPN value stack.
 pub const STACK_DEPTH: usize = 16;

@@ -108,6 +108,363 @@ static const wfc_assignment_t *find_assignment(const wfc_vector_t *vector,
 }
 
 static void write_bits(uint8_t *output, size_t offset, uint8_t width,
+                       uint64_t value, wfc_bit_order_t order);
+static uint64_t read_bits(const uint8_t *input, size_t offset, uint8_t width,
+                          wfc_bit_order_t order);
+static void write_scalar(uint8_t *output, size_t offset, size_t octets,
+                         uint64_t value, wfc_byte_order_t order);
+static uint64_t read_scalar(const uint8_t *input, size_t offset,
+                            size_t octets, wfc_byte_order_t order);
+
+static int write_sdnv_vector(uint8_t *output, size_t capacity,
+                             size_t *position, uint64_t value)
+{
+    uint8_t encoded[10];
+    size_t length = 1;
+    size_t index;
+    uint64_t remaining = value;
+
+    while (remaining > 0x7fU)
+    {
+        remaining >>= 7;
+        length++;
+    }
+    if (length > capacity - *position)
+    {
+        return 0;
+    }
+    for (index = 0; index < length; index++)
+    {
+        size_t shift = (length - index - 1U) * 7U;
+        encoded[index] = (uint8_t)((value >> shift) & 0x7fU);
+        if (index + 1U != length)
+        {
+            encoded[index] |= 0x80U;
+        }
+    }
+    memcpy(output + *position, encoded, length);
+    *position += length;
+    return 1;
+}
+
+static int read_sdnv_vector(const uint8_t *input, size_t length,
+                            size_t *position, uint64_t *result)
+{
+    uint64_t value = 0;
+    size_t index;
+
+    for (index = 0; index < 10; index++)
+    {
+        uint8_t byte;
+
+        if (*position == length)
+        {
+            return 0;
+        }
+        byte = input[(*position)++];
+        if (value > (UINT64_MAX >> 7))
+        {
+            return 0;
+        }
+        value = (value << 7) | (uint64_t)(byte & 0x7fU);
+        if ((byte & 0x80U) == 0)
+        {
+            *result = value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint64_t vector_field_value(const wfc_vector_t *vector,
+                                   const wfc_field_t *field)
+{
+    if (field->is_constant)
+    {
+        return field->constant;
+    }
+    if (field->length_of != NULL)
+    {
+        const wfc_assignment_t *target = find_assignment(vector,
+                                                         field->length_of);
+        return target == NULL ? 0 : target->byte_count;
+    }
+    return find_assignment(vector, field->name)->value;
+}
+
+static int check_vector_v3(const wfc_protocol_t *protocol,
+                           const wfc_message_t *message,
+                           const wfc_vector_t *vector,
+                           wfc_error_t *error)
+{
+    uint8_t *encoded;
+    uint64_t *decoded_values;
+    size_t bit_position = 0;
+    size_t input_position = 0;
+    size_t index;
+    int success = 0;
+
+    for (index = 0; index < message->field_count; index++)
+    {
+        if (message->fields[index].type == WFC_RECORDS ||
+            message->fields[index].type == WFC_CHOICE)
+        {
+            wfc_set_error(error, vector->location,
+                          "message `%s` contains records or choices and must be tested through its generated runtime program",
+                          message->name);
+            return 0;
+        }
+    }
+
+    for (index = 0; index < vector->assignment_count; index++)
+    {
+        const wfc_assignment_t *assignment = &vector->assignments[index];
+        const wfc_field_t *field = find_field(message, assignment->name, NULL);
+
+        if (field == NULL)
+        {
+            wfc_set_error(error, assignment->location,
+                          "vector `%s` assigns unknown field `%s`",
+                          vector->name, assignment->name);
+            return 0;
+        }
+        if (field->is_constant || field->length_of != NULL ||
+            field->count_of != NULL)
+        {
+            wfc_set_error(error, assignment->location,
+                          "vector `%s` may not assign derived or constant field `%s`",
+                          vector->name, field->name);
+            return 0;
+        }
+        if (field->type == WFC_BYTES && !assignment->is_bytes)
+        {
+            wfc_set_error(error, assignment->location,
+                          "byte field `%s` requires an octet array", field->name);
+            return 0;
+        }
+        if (field->type == WFC_RECORDS || field->type == WFC_CHOICE)
+        {
+            wfc_set_error(error, assignment->location,
+                          "record field `%s` is supplied through a record list",
+                          field->name);
+            return 0;
+        }
+        if (field->type != WFC_BYTES && assignment->is_bytes)
+        {
+            wfc_set_error(error, assignment->location,
+                          "scalar field `%s` requires an unsigned integer",
+                          field->name);
+            return 0;
+        }
+        if (field->type != WFC_BYTES && field->type != WFC_SDNV &&
+            !wfc_value_fits(assignment->value, wfc_field_width(field)))
+        {
+            wfc_set_error(error, assignment->location,
+                          "value %llu does not fit in a %u-bit field",
+                          (unsigned long long)assignment->value,
+                          (unsigned)wfc_field_width(field));
+            return 0;
+        }
+    }
+    for (index = 0; index < message->field_count; index++)
+    {
+        const wfc_field_t *field = &message->fields[index];
+
+        if (!field->is_constant && field->length_of == NULL &&
+            field->count_of == NULL &&
+            find_assignment(vector, field->name) == NULL)
+        {
+            wfc_set_error(error, vector->location,
+                          "vector `%s` has no value for field `%s`",
+                          vector->name, field->name);
+            return 0;
+        }
+    }
+
+    encoded = calloc(vector->wire_count == 0 ? 1 : vector->wire_count, 1);
+    decoded_values = calloc(message->field_count, sizeof(*decoded_values));
+    if (encoded == NULL || decoded_values == NULL)
+    {
+        wfc_set_error(error, vector->location, "out of memory");
+        goto done;
+    }
+    for (index = 0; index < message->field_count; index++)
+    {
+        const wfc_field_t *field = &message->fields[index];
+        uint64_t value = vector_field_value(vector, field);
+
+        if (field->type == WFC_BITS)
+        {
+            if (bit_position + field->width > vector->wire_count * 8U)
+            {
+                goto size_error;
+            }
+            write_bits(encoded, bit_position, field->width, value,
+                       protocol->bit_order);
+            bit_position += field->width;
+            continue;
+        }
+        if (bit_position % 8U != 0)
+        {
+            wfc_set_error(error, field->location,
+                          "field `%s` is not octet-aligned", field->name);
+            goto done;
+        }
+        {
+            size_t position = bit_position / 8U;
+
+            if (field->type == WFC_SDNV)
+            {
+                if (!write_sdnv_vector(encoded, vector->wire_count,
+                                       &position, value))
+                {
+                    goto size_error;
+                }
+            }
+            else if (field->type == WFC_BYTES)
+            {
+                const wfc_assignment_t *assignment = find_assignment(
+                    vector, field->name);
+                if (assignment->byte_count > vector->wire_count - position)
+                {
+                    goto size_error;
+                }
+                memcpy(encoded + position, assignment->bytes,
+                       assignment->byte_count);
+                position += assignment->byte_count;
+            }
+            else
+            {
+                size_t octets = wfc_field_width(field) / 8U;
+                if (octets > vector->wire_count - position)
+                {
+                    goto size_error;
+                }
+                write_scalar(encoded, position, octets, value,
+                             protocol->byte_order);
+                position += octets;
+            }
+            bit_position = position * 8U;
+        }
+    }
+    if (bit_position != vector->wire_count * 8U)
+    {
+        goto size_error;
+    }
+    if (memcmp(encoded, vector->wire, vector->wire_count) != 0)
+    {
+        for (index = 0; index < vector->wire_count; index++)
+        {
+            if (encoded[index] != vector->wire[index])
+            {
+                wfc_set_error(error, vector->location,
+                              "vector `%s` encodes octet %zu as %02X, but `wire` contains %02X",
+                              vector->name, index, encoded[index],
+                              vector->wire[index]);
+                goto done;
+            }
+        }
+    }
+
+    bit_position = 0;
+    for (index = 0; index < message->field_count; index++)
+    {
+        const wfc_field_t *field = &message->fields[index];
+        uint64_t decoded = 0;
+        uint64_t wanted = vector_field_value(vector, field);
+
+        if (field->type == WFC_BITS)
+        {
+            decoded = read_bits(vector->wire, bit_position, field->width,
+                                protocol->bit_order);
+            bit_position += field->width;
+        }
+        else
+        {
+            input_position = bit_position / 8U;
+            if (field->type == WFC_SDNV)
+            {
+                if (!read_sdnv_vector(vector->wire, vector->wire_count,
+                                      &input_position, &decoded))
+                {
+                    wfc_set_error(error, vector->location,
+                                  "vector `%s` contains an invalid SDNV",
+                                  vector->name);
+                    goto done;
+                }
+            }
+            else if (field->type == WFC_BYTES)
+            {
+                const wfc_assignment_t *assignment = find_assignment(
+                    vector, field->name);
+                size_t length_index = 0;
+                size_t byte_count;
+
+                if (field->length_from == NULL)
+                {
+                    byte_count = vector->wire_count - input_position;
+                }
+                else
+                {
+                    find_field(message, field->length_from, &length_index);
+                    byte_count = (size_t)decoded_values[length_index];
+                }
+                if (byte_count > vector->wire_count - input_position ||
+                    byte_count != assignment->byte_count ||
+                    memcmp(vector->wire + input_position, assignment->bytes,
+                           byte_count) != 0)
+                {
+                    wfc_set_error(error, vector->location,
+                                  "vector `%s` decodes byte field `%s` incorrectly",
+                                  vector->name, field->name);
+                    goto done;
+                }
+                input_position += byte_count;
+                bit_position = input_position * 8U;
+                continue;
+            }
+            else
+            {
+                size_t octets = wfc_field_width(field) / 8U;
+                if (octets > vector->wire_count - input_position)
+                {
+                    goto size_error;
+                }
+                decoded = read_scalar(vector->wire, input_position, octets,
+                                      protocol->byte_order);
+                input_position += octets;
+            }
+            bit_position = input_position * 8U;
+        }
+        decoded_values[index] = decoded;
+        if (decoded != wanted)
+        {
+            wfc_set_error(error, vector->location,
+                          "vector `%s` decodes field `%s` as %llu, expected %llu",
+                          vector->name, field->name,
+                          (unsigned long long)decoded,
+                          (unsigned long long)wanted);
+            goto done;
+        }
+    }
+    if (bit_position != vector->wire_count * 8U)
+    {
+        goto size_error;
+    }
+    success = 1;
+    goto done;
+
+size_error:
+    wfc_set_error(error, vector->location,
+                  "vector `%s` wire length does not match message `%s`",
+                  vector->name, message->name);
+done:
+    free(encoded);
+    free(decoded_values);
+    return success;
+}
+
+static void write_bits(uint8_t *output, size_t offset, uint8_t width,
                        uint64_t value, wfc_bit_order_t order)
 {
     size_t index;
@@ -207,6 +564,11 @@ static int check_vector(const wfc_protocol_t *protocol,
     size_t mismatch = SIZE_MAX;
     size_t variable_octets = 0;
     size_t wire_octets;
+
+    if (protocol->version >= 3)
+    {
+        return check_vector_v3(protocol, message, vector, error);
+    }
 
     for (index = 0; index < vector->assignment_count; index++) {
         const wfc_assignment_t *assignment = &vector->assignments[index];
@@ -341,6 +703,7 @@ int wfc_check(const wfc_protocol_t *protocol, wfc_summary_t *summary,
               wfc_error_t *error)
 {
     size_t message_index;
+    if (protocol->version == 4) { return wfc_records_check(protocol, summary, error); }
     memset(summary, 0, sizeof(*summary));
 
     if (!text_present(protocol->description)) {

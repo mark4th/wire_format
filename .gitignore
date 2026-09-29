@@ -6,3 +6,5 @@ Cargo.lock
 call_test
 *.d
 quad_test
+__pycache__/
+*.py[cod]

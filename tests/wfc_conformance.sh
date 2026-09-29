@@ -48,6 +48,18 @@ target/debug/wfc tests/data/wfc-v2-bytes.wf --output "$work/rust/v2" >/dev/null
 cmp "$work/c/v2.wi" "$work/rust/v2.wi"
 cmp "$work/c/v2.h" "$work/rust/v2.h"
 
+./wfc tests/data/wfc-v3-tlv.wf --output "$work/c/v3-tlv" >/dev/null
+target/debug/wfc tests/data/wfc-v3-tlv.wf \
+    --output "$work/rust/v3-tlv" >/dev/null
+cmp "$work/c/v3-tlv.wi" "$work/rust/v3-tlv.wi"
+cmp "$work/c/v3-tlv.h" "$work/rust/v3-tlv.h"
+
+./wfc tests/data/wfc-v3-records.wf --output "$work/c/v3" >/dev/null
+target/debug/wfc tests/data/wfc-v3-records.wf \
+    --output "$work/rust/v3" >/dev/null
+cmp "$work/c/v3.wi" "$work/rust/v3.wi"
+cmp "$work/c/v3.h" "$work/rust/v3.h"
+
 sed 's/wire_format: 2/wire_format: 1/' \
     tests/data/wfc-v2-bytes.wf >"$work/v1-bytes.wf"
 if ./wfc check "$work/v1-bytes.wf" >/dev/null 2>&1; then
@@ -98,3 +110,12 @@ cc -std=c11 -Wall -Wextra -Werror \
     -o "$work/c/v2-incbin-test"
 
 (cd "$work/c" && ./v2-incbin-test)
+
+cc -std=c11 -Wall -Wextra -Werror \
+    -I"$repo" -I"$work/c" \
+    "$repo/tests/wfc_wi_v3_harness.c" \
+    "$repo/tests/wfc_wi_v3_incbin.S" \
+    "$repo/wire_format.c" \
+    -o "$work/c/v3-incbin-test"
+
+(cd "$work/c" && ./v3-incbin-test)

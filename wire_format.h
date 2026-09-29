@@ -6,10 +6,11 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "wire_record.h"
 
 // -----------------------------------------------------------------------
 
-#define WI_STACK_DEPTH  16
+#define WI_STACK_DEPTH  64
 #define WI_MAX_PARAMS   16
 #define WI_MAX_VARS     26
 
@@ -18,6 +19,28 @@ typedef struct
     const uint8_t *data;
     size_t         length;
 } wi_slice_t;
+
+typedef struct wi_record_list wi_record_list_t;
+
+/*
+ * One allocation-free row in a version-3 counted record sequence.  Scalar
+ * fields, byte slices, and nested record lists use the same caller-field
+ * ordinals as an ordinary message.
+ */
+typedef struct
+{
+    int64_t           values[WI_MAX_PARAMS];
+    wi_slice_t        slices[WI_MAX_PARAMS];
+    wi_record_list_t *lists[WI_MAX_PARAMS];
+} wi_record_t;
+
+struct wi_record_list
+{
+    wi_record_t *records;
+    size_t       count;
+    size_t       capacity;
+    size_t       field_count;
+};
 
 // ⚠ HOW DEEP %[n] MAY NEST.  each frame is a return address, the
 // caller's index, the called format's start and a loop counter - 28
@@ -58,6 +81,8 @@ typedef struct
     int64_t  params[WI_MAX_PARAMS];     // caller-supplied parameters
     int64_t  vars[WI_MAX_VARS];         // variables a-z; A-Z are aliases
     wi_slice_t slices[WI_MAX_PARAMS];   // zero-copy fields captured by %R
+    wi_record_list_t *record_lists[WI_MAX_PARAMS];
+    unsigned sequence_depth;
 
     uint8_t       *out;                 // output buffer (encode)
     size_t         out_size;            // output buffer capacity
@@ -94,6 +119,10 @@ typedef struct
     // neither being an option for a parser fed by a network.
 
     int          overrun;
+
+    /* Optional named records: still executed by wi_parse and the same RPN stack. */
+    wi_record_scope_t *record_scope;
+    unsigned write_bits, read_bits;
 } wi_vars_t;
 
 // -----------------------------------------------------------------------
@@ -138,10 +167,15 @@ void    wi_decode_init(wi_vars_t *v, const uint8_t *in, size_t in_size,
 
 int     wi_set_formats(wi_vars_t *v, const char **fmts, int nfmts);
 
-// Attach a zero-copy byte slice to a caller-field slot.  Version-2 encode
-// programs emit it with %v; version-2 decode programs expose captured %R data
-// through v->slices[slot].  Call after wi_init()/wi_decode_init().
+// Attach a zero-copy byte slice to a caller-field slot. Version-2 programs use
+// %v/%R; version-3 bounded fields use %z/%V/%N. Decoded data is exposed through
+// v->slices[slot]. Call after wi_init()/wi_decode_init().
 int     wi_set_slice(wi_vars_t *v, int slot, const uint8_t *data, size_t length);
+
+// Attach an allocation-free counted record list to a caller-field slot.
+// For encode, set list->count.  Decode writes list->count and refuses input
+// whose advertised count exceeds list->capacity.
+int     wi_set_record_list(wi_vars_t *v, int slot, wi_record_list_t *list);
 
 // ⚠ CHECK v->overrun AFTER PARSING.  the return value is the length
 // produced, which for a truncated encode is a short but plausible

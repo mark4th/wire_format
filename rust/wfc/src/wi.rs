@@ -56,7 +56,11 @@ fn compile_message<'a>(protocol: &Protocol, message: &'a Message) -> Result<Comp
     let value_fields: Vec<&Field> = message
         .fields
         .iter()
-        .filter(|field| matches!(field.kind, FieldKind::Supplied))
+        .filter(|field| {
+            matches!(field.kind, FieldKind::Supplied)
+                && field.length_of.is_none()
+                && field.count_of.is_none()
+        })
         .collect();
 
     if value_fields.len() > MAX_CALLER_FIELDS {
@@ -74,18 +78,50 @@ fn compile_message<'a>(protocol: &Protocol, message: &'a Message) -> Result<Comp
     let mut decode = String::new();
     let mut value_widths = Vec::with_capacity(value_fields.len());
     let mut value_swaps = Vec::with_capacity(value_fields.len());
+    let mut ordinals = vec![None; message.fields.len()];
+    let mut variables = vec![None; message.fields.len()];
     let mut value_index = 0usize;
 
     for (field_index, field) in message.fields.iter().enumerate() {
-        let supplied_index = if matches!(field.kind, FieldKind::Supplied) {
-            let index = value_index;
-            value_index += 1;
+        if matches!(field.kind, FieldKind::Supplied)
+            && field.length_of.is_none()
+            && field.count_of.is_none()
+        {
+            ordinals[field_index] = Some(value_index);
             value_widths.push(field.field_type.width());
             value_swaps.push(scalar_swap(field.field_type, protocol.byte_order));
-            Some(index)
+            value_index += 1;
+        }
+    }
+    let mut next_variable = value_index;
+    for (field_index, field) in message.fields.iter().enumerate() {
+        if matches!(field.kind, FieldKind::Constant(_))
+            || matches!(
+                field.field_type,
+                FieldType::Bytes | FieldType::Records | FieldType::Choice
+            )
+        {
+            continue;
+        }
+        if field.length_of.is_none() && field.count_of.is_none() {
+            variables[field_index] = ordinals[field_index];
         } else {
-            None
-        };
+            if next_variable >= 26 {
+                return Err(Diagnostic::new(
+                    field.location,
+                    format!(
+                        "message `{}` needs more than 26 decode variables",
+                        message.name
+                    ),
+                ));
+            }
+            variables[field_index] = Some(next_variable);
+            next_variable += 1;
+        }
+    }
+
+    for (field_index, field) in message.fields.iter().enumerate() {
+        let supplied_index = ordinals[field_index];
 
         if matches!(field.kind, FieldKind::Supplied)
             && matches!(field.field_type, FieldType::Bits(64))
@@ -99,13 +135,103 @@ fn compile_message<'a>(protocol: &Protocol, message: &'a Message) -> Result<Comp
             ));
         }
 
-        let (field_encode, field_decode) = compile_field(
-            field,
-            layout.offsets[field_index],
-            supplied_index,
-            protocol.byte_order,
-            protocol.bit_order,
-        );
+        let (field_encode, field_decode) = if let Some(target_name) = &field.length_of {
+            let target_index = message
+                .fields
+                .iter()
+                .position(|candidate| candidate.name == *target_name)
+                .expect("validated length target");
+            compile_derived_length(
+                field.field_type,
+                ordinals[target_index].expect("byte field ordinal"),
+                variables[field_index].expect("derived variable"),
+            )
+        } else if let Some(target_name) = &field.count_of {
+            let target_index = message
+                .fields
+                .iter()
+                .position(|candidate| candidate.name == *target_name)
+                .expect("validated record target");
+            compile_derived_count(
+                field,
+                layout.offsets[field_index],
+                ordinals[target_index].expect("record field ordinal"),
+                variables[field_index].expect("derived variable"),
+                protocol.bit_order,
+            )
+        } else if matches!(field.field_type, FieldType::Bytes) && field.length_from.is_some() {
+            let length_index = message
+                .fields
+                .iter()
+                .position(|candidate| Some(candidate.name.as_str()) == field.length_from.as_deref())
+                .expect("validated length source");
+            let slot = supplied_index.expect("byte field ordinal");
+            (
+                format!("%{{{slot}}}%z%{{{slot}}}%V"),
+                format!(
+                    "%g{}%{{{slot}}}%N",
+                    variable(variables[length_index].expect("length variable"))
+                ),
+            )
+        } else if matches!(field.field_type, FieldType::Records) {
+            let child_index = protocol
+                .messages
+                .iter()
+                .position(|candidate| Some(candidate.name.as_str()) == field.message.as_deref())
+                .expect("validated record message");
+            let child_fields = caller_field_count(&protocol.messages[child_index]);
+            let count_index = message
+                .fields
+                .iter()
+                .position(|candidate| Some(candidate.name.as_str()) == field.count_from.as_deref())
+                .expect("validated count source");
+            let slot = supplied_index.expect("record field ordinal");
+            (
+                format!("%{{{slot}}}%k%{{{slot}}}%{{{child_fields}}}%J[{child_index}]"),
+                format!(
+                    "%g{}%{{{slot}}}%{{{child_fields}}}%J[{child_index}]",
+                    variable(variables[count_index].expect("count variable"))
+                ),
+            )
+        } else if matches!(field.field_type, FieldType::Choice) {
+            let selector_index = message
+                .fields
+                .iter()
+                .position(|candidate| Some(candidate.name.as_str()) == field.select_from.as_deref())
+                .expect("validated selector");
+            let selector_ordinal = ordinals[selector_index].expect("selector ordinal");
+            let selector_variable = variables[selector_index].expect("selector variable");
+            let slot = supplied_index.expect("choice field ordinal");
+            let mut field_encode = String::new();
+            let mut field_decode = String::new();
+            for case in &field.cases {
+                let child_index = protocol
+                    .messages
+                    .iter()
+                    .position(|candidate| candidate.name == case.message)
+                    .expect("validated choice message");
+                let child_fields = caller_field_count(&protocol.messages[child_index]);
+                field_encode.push_str(&format!(
+                    "%?%p{{{}}}%{{{}}}%=%t%{{1}}%{{{slot}}}%{{{child_fields}}}%J[{child_index}]%;",
+                    selector_ordinal + 1,
+                    case.value,
+                ));
+                field_decode.push_str(&format!(
+                    "%?%g{}%{{{}}}%=%t%{{1}}%{{{slot}}}%{{{child_fields}}}%J[{child_index}]%;",
+                    variable(selector_variable),
+                    case.value,
+                ));
+            }
+            (field_encode, field_decode)
+        } else {
+            compile_field(
+                field,
+                layout.offsets[field_index],
+                supplied_index,
+                protocol.byte_order,
+                protocol.bit_order,
+            )
+        };
         encode.push_str(&field_encode);
         decode.push_str(&field_decode);
     }
@@ -121,6 +247,117 @@ fn compile_message<'a>(protocol: &Protocol, message: &'a Message) -> Result<Comp
     })
 }
 
+fn caller_field_count(message: &Message) -> usize {
+    message
+        .fields
+        .iter()
+        .filter(|field| {
+            matches!(field.kind, FieldKind::Supplied)
+                && field.length_of.is_none()
+                && field.count_of.is_none()
+        })
+        .count()
+}
+
+fn compile_derived_length(
+    field_type: FieldType,
+    slice_slot: usize,
+    variable_index: usize,
+) -> (String, String) {
+    let (encode_op, decode_op) = match field_type {
+        FieldType::U8 => ("%b", "%B"),
+        FieldType::U16 => ("%w", "%S"),
+        FieldType::U32 => ("%W", "%L"),
+        FieldType::U64 => ("%q", "%Q"),
+        FieldType::Sdnv => ("%d", "%D"),
+        FieldType::Bits(_) | FieldType::Bytes | FieldType::Records | FieldType::Choice => {
+            unreachable!()
+        }
+    };
+    (
+        format!("%{{{slice_slot}}}%z{encode_op}"),
+        format!("{decode_op}%P{}", variable(variable_index)),
+    )
+}
+
+fn compile_derived_count(
+    field: &Field,
+    bit_offset: usize,
+    record_slot: usize,
+    variable_index: usize,
+    bit_order: BitOrder,
+) -> (String, String) {
+    let source = format!("%{{{record_slot}}}%k");
+    if let FieldType::Bits(width) = field.field_type {
+        return compile_derived_bits(bit_offset, width, &source, variable_index, bit_order);
+    }
+    let (encode_op, decode_op) = match field.field_type {
+        FieldType::U8 => ("%b", "%B"),
+        FieldType::U16 => ("%w", "%S"),
+        FieldType::U32 => ("%W", "%L"),
+        FieldType::U64 => ("%q", "%Q"),
+        FieldType::Sdnv => ("%d", "%D"),
+        _ => unreachable!(),
+    };
+    (
+        format!("{source}{encode_op}"),
+        format!("{decode_op}%P{}", variable(variable_index)),
+    )
+}
+
+fn compile_derived_bits(
+    bit_offset: usize,
+    width: u8,
+    source: &str,
+    variable_index: usize,
+    bit_order: BitOrder,
+) -> (String, String) {
+    let mut encode = String::new();
+    let mut decode = String::new();
+    let mut consumed = 0u8;
+    let mut cursor = bit_offset;
+    let mut first_fragment = true;
+
+    while consumed < width {
+        let within = cursor % 8;
+        let chunk = (8 - within).min(usize::from(width - consumed)) as u8;
+        let (source_shift, position) = match bit_order {
+            BitOrder::MsbFirst => (width - consumed - chunk, 8 - within as u8 - chunk),
+            BitOrder::LsbFirst => (consumed, within as u8),
+        };
+        encode.push_str(source);
+        if source_shift != 0 {
+            push_literal(&mut encode, UINT64_ONE << source_shift);
+            encode.push_str("%/");
+        }
+        push_literal(&mut encode, bit_mask(chunk));
+        encode.push_str("%&");
+        append_bit_operation(&mut encode, chunk, position, 'x');
+
+        if !first_fragment && bit_order == BitOrder::MsbFirst {
+            push_literal(&mut decode, UINT64_ONE << chunk);
+            decode.push_str("%*");
+        }
+        append_bit_operation(&mut decode, chunk, position, 'X');
+        if !first_fragment {
+            if bit_order == BitOrder::LsbFirst {
+                push_literal(&mut decode, UINT64_ONE << consumed);
+                decode.push_str("%*");
+            }
+            decode.push_str("%+");
+        }
+        consumed += chunk;
+        cursor += usize::from(chunk);
+        first_fragment = false;
+        if cursor % 8 == 0 {
+            encode.push_str("%f");
+            decode.push_str("%f");
+        }
+    }
+    decode.push_str(&format!("%P{}", variable(variable_index)));
+    (encode, decode)
+}
+
 fn scalar_swap(field_type: FieldType, byte_order: ByteOrder) -> u8 {
     if byte_order != ByteOrder::LittleEndian {
         return 0;
@@ -129,7 +366,12 @@ fn scalar_swap(field_type: FieldType, byte_order: ByteOrder) -> u8 {
         FieldType::U16 => 2,
         FieldType::U32 => 4,
         FieldType::U64 => 8,
-        FieldType::Bits(_) | FieldType::U8 | FieldType::Bytes => 0,
+        FieldType::Bits(_)
+        | FieldType::U8
+        | FieldType::Sdnv
+        | FieldType::Bytes
+        | FieldType::Records
+        | FieldType::Choice => 0,
     }
 }
 
@@ -146,6 +388,7 @@ fn compile_field(
             let index = supplied_index.expect("a byte field cannot be constant");
             (format!("%{{{index}}}%v"), format!("%{{{index}}}%R"))
         }
+        FieldType::Records | FieldType::Choice => unreachable!(),
         scalar => compile_scalar(field, scalar, supplied_index, byte_order),
     }
 }
@@ -156,6 +399,23 @@ fn compile_scalar(
     supplied_index: Option<usize>,
     byte_order: ByteOrder,
 ) -> (String, String) {
+    if matches!(field_type, FieldType::Sdnv) {
+        if let Some(index) = supplied_index {
+            return (
+                format!("%p{{{}}}%d", index + 1),
+                format!("%D%P{}", variable(index)),
+            );
+        }
+        let FieldKind::Constant(value) = field.kind else {
+            unreachable!()
+        };
+        let mut encode = String::new();
+        let mut decode = String::from("%D");
+        push_literal(&mut encode, value);
+        encode.push_str("%d");
+        append_constant_check(&mut decode, value);
+        return (encode, decode);
+    }
     let octets = field_type.width() / 8;
     if let Some(index) = supplied_index {
         let encode_op = match field_type {
@@ -163,14 +423,20 @@ fn compile_scalar(
             FieldType::U16 => "%w",
             FieldType::U32 => "%W",
             FieldType::U64 => "%q",
-            FieldType::Bits(_) | FieldType::Bytes => unreachable!(),
+            FieldType::Sdnv => unreachable!(),
+            FieldType::Bits(_) | FieldType::Bytes | FieldType::Records | FieldType::Choice => {
+                unreachable!()
+            }
         };
         let decode_op = match field_type {
             FieldType::U8 => "%B",
             FieldType::U16 => "%S",
             FieldType::U32 => "%L",
             FieldType::U64 => "%Q",
-            FieldType::Bits(_) | FieldType::Bytes => unreachable!(),
+            FieldType::Sdnv => unreachable!(),
+            FieldType::Bits(_) | FieldType::Bytes | FieldType::Records | FieldType::Choice => {
+                unreachable!()
+            }
         };
         return (
             format!("%p{{{}}}{encode_op}", index + 1),
