@@ -41,6 +41,9 @@ int main(void)
         return 2;
     if (get_u32(wfc_test_wi_start + 8) != EXAMPLE_TELEMETRY_WI_FILE_SIZE)
         return 3;
+    if (!wi_file_crc32c_valid(wfc_test_wi_start,
+                              (size_t)(wfc_test_wi_end - wfc_test_wi_start)))
+        return 12;
     if (strcmp(get_string(EXAMPLE_TELEMETRY_WI_PROTOCOL_STRINGS_OFFSET,
                           EXAMPLE_TELEMETRY_PROTOCOL_STRING_NAME),
                "example-telemetry") != 0)

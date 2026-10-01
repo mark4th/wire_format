@@ -69,6 +69,17 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn wi_crc32c(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for (index, stored) in bytes.iter().copied().enumerate() {
+        crc ^= u32::from(if (60..64).contains(&index) { 0 } else { stored });
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82f63b78 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
 fn string_at(bytes: &[u8], section: u32, slot: u32) -> &str {
     let relative = u32_at(bytes, section as usize + slot as usize * 4);
     assert_ne!(relative, u32::MAX);
@@ -183,7 +194,8 @@ fn compiles_crossing_bits_little_endian_and_u64_metadata() {
     let (directory, _stem, _header, binary) =
         compile_wi("tests/data/wfc-types.wf", "compiled_types");
     assert_wi_header(&binary);
-    assert_eq!(u32_at(&binary, 12), 3);
+    assert_eq!(u32_at(&binary, 12), (1 << 31) | 3);
+    assert_eq!(u32_at(&binary, 60), wi_crc32c(&binary));
     assert_eq!(u32_at(&binary, 16), 3);
     let protocol_strings = u32_at(&binary, 36) as usize;
     assert_eq!(u32_at(&binary, protocol_strings + 8), u32::MAX);

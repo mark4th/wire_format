@@ -11,7 +11,7 @@ import struct
 from vectors import Runtime, Database
 from wf_source import loads_source
 
-def compile_text(text):
+def compile_artifacts(text):
     with tempfile.TemporaryDirectory(prefix='wfc-info-') as path:
         stem = Path(path) / 'protocol'
         stem.with_suffix('.wf').write_text(text)
@@ -19,10 +19,29 @@ def compile_text(text):
             str(stem.with_suffix('.wf')), '--output', str(stem)], capture_output=True, text=True)
         if result.returncode:
             raise ValueError(result.stderr)
-        return stem.with_suffix('.wi').read_bytes()
+        return stem.with_suffix('.h').read_text(), stem.with_suffix('.wi').read_bytes()
+
+def compile_text(text):
+    return compile_artifacts(text)[1]
 
 def compile_source(source):
     return compile_text(json.dumps(source))
+
+def wi_crc32c(data):
+    crc = 0xffffffff
+    for index, stored in enumerate(data):
+        byte = 0 if 60 <= index < 64 else stored
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+    return crc ^ 0xffffffff
+
+def set_wi_crc32c(data):
+    result = bytearray(data)
+    struct.pack_into('<I', result, 60, wi_crc32c(result))
+    return bytes(result)
+
+assert wi_crc32c(b'123456789') == 0xe3069283
 
 # Hex numbers retain all 64 bits; hex-looking strings and escaped quotes stay
 # untouched. Invalid numeric tokens must still be rejected.
@@ -51,8 +70,41 @@ source = schema([
     {'name': 'size', 'type': 'sdnv', 'value': ['len', 'payload']},
     {'name': 'payload', 'type': 'bytes', 'length': 'size'},
     {'name': 'crc', 'type': 'crc'}])
-image = compile_source(source)
+generated_header, image = compile_artifacts(json.dumps(source))
+assert '#define TEST_WI_FORMAT_VERSION 4u' in generated_header
+assert '#define TEST_WI_FILE_SIZE ' in generated_header
+assert '#define TEST_WI_CRC32C ' in generated_header
+assert '#define TEST_MESSAGE_RECORD 0u' in generated_header
+assert '#define TEST_RECORD_FIELD_COUNT 6u' in generated_header
+assert '#define TEST_RECORD_ORDINAL_PAYLOAD 4u' in generated_header
+assert '#define TEST_RECORD_TYPE_PAYLOAD 2u' in generated_header
+with tempfile.TemporaryDirectory(prefix='wfc-header-') as path:
+    path = Path(path)
+    (path / 'test.h').write_text(generated_header)
+    (path / 'consumer.c').write_text(
+        '#include "test.h"\n'
+        '_Static_assert(TEST_MESSAGE_RECORD == 0u, "message");\n'
+        '_Static_assert(TEST_RECORD_ORDINAL_PAYLOAD == 4u, "field");\n'
+        'int main(void) { return 0; }\n')
+    result = subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+        '-fsyntax-only', str(path / 'consumer.c')], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+nested = {'wire_format': 4, 'protocol': {'name': 'nested', 'messages': [
+    {'name': 'item', 'fields': [{'name': 'value', 'type': 'uint', 'width': 8}]},
+    {'name': 'batch', 'fields': [
+        {'name': 'items', 'type': 'records', 'message': 'item', 'count': 1}]}
+]}}
+nested_header, _ = compile_artifacts(json.dumps(nested))
+assert '#define NESTED_MESSAGE_ITEM 0u' in nested_header
+assert '#define NESTED_MESSAGE_BATCH 1u' in nested_header
+assert '#define NESTED_BATCH_CHILD_ITEMS NESTED_MESSAGE_ITEM' in nested_header
+assert struct.unpack_from('<I', image, 60)[0] == wi_crc32c(image)
 r = Runtime(args.library, image)
+r.lib.wi_file_crc32c.argtypes = [C.c_void_p, C.c_size_t]
+r.lib.wi_file_crc32c.restype = C.c_uint32
+check_text = C.create_string_buffer(b'123456789')
+assert r.lib.wi_file_crc32c(check_text, 9) == 0xe3069283
 # Published CCITT-FALSE check value for ASCII "123456789".
 c = Runtime(args.library, compile_source(schema([
     {'name': 'data', 'type': 'bytes', 'length': 9}, {'name': 'crc', 'type': 'crc'}])))
@@ -86,6 +138,7 @@ for length in [0, 1, 127, 128, 255, 1024]:
 assert image[:8] == b'WI\0\0\4\0\x40\0'
 assert b'%{10}%P{constant}' in image
 changed = image.replace(b'%{10}%P{constant}', b'%{11}%P{constant}', 1)
+changed = set_wi_crc32c(changed)
 r_changed = Runtime(args.library, changed)
 record = r_changed.record(0, {'small': 15, 'payload': []})
 out, used = C.create_string_buffer(64), C.c_size_t()
@@ -116,7 +169,7 @@ def program_image(program):
     changed.extend(program + b'\0')
     struct.pack_into('<I', changed, 8, len(changed))
     struct.pack_into('<I', changed, 56, len(changed) - strings)
-    return bytes(changed)
+    return set_wi_crc32c(changed)
 for condition, expected in [(0, 0x33), (1, 0x22)]:
     program = (b'%?%{' + str(condition).encode() + b'}%t%?%{0}%t%{17}%{8}%i'
                b'%e%{34}%{8}%i%;%e%{51}%{8}%i%;%uF')
@@ -137,7 +190,7 @@ for replacement in (b'%r', b'%?', b'%u', b'%J', b'%g', b'%{'):
     bad = bytearray(image)
     start = bad.index(b'%{10}')
     bad[start:start+3] = replacement + b'\0'
-    buf = C.create_string_buffer(bytes(bad))
+    buf = C.create_string_buffer(set_wi_crc32c(bad))
     db = Database()
     assert r.lib.wire_info_open(C.byref(db), buf, len(bad)) != 0
     assert not db.data
@@ -145,10 +198,32 @@ for replacement in (b'%r', b'%?', b'%u', b'%J', b'%g', b'%{'):
 bad = bytearray(image)
 start = bad.index(b'%{10}')
 bad[start:start+3] = b'%i\0'
-r_bad = Runtime(args.library, bytes(bad))
+r_bad = Runtime(args.library, set_wi_crc32c(bad))
 record = r_bad.record(0, {})
 assert r_bad.lib.wire_info_encode(C.byref(r_bad.db), 0, C.byref(record), out, len(out), C.byref(used)) != 0
 assert used.value == 0
+# Corruption in each populated file section, or in the stored checksum itself,
+# is rejected specifically as a checksum failure before contents are exposed.
+message_table = struct.unpack_from('<I', image, 24)[0]
+metadata = struct.unpack_from('<I', image, 28)[0]
+offsets = struct.unpack_from('<I', image, 44)[0]
+strings = struct.unpack_from('<I', image, 52)[0]
+for position in (32, message_table, metadata, offsets, strings, 60):
+    corrupt = bytearray(image)
+    corrupt[position] ^= 1
+    buf = C.create_string_buffer(bytes(corrupt))
+    db = Database()
+    assert r.lib.wire_info_open(C.byref(db), buf, len(corrupt)) == 7
+    assert not db.data
+# A release-0.1.0-style image with no integrity flag or checksum is rejected
+# and therefore cannot be mistaken for a current catalog.
+legacy = bytearray(image)
+struct.pack_into('<I', legacy, 12, 0)
+struct.pack_into('<I', legacy, 60, 0)
+buf = C.create_string_buffer(bytes(legacy))
+db = Database()
+assert r.lib.wire_info_open(C.byref(db), buf, len(legacy)) == 2
+assert not db.data
 for size in range(len(image)):
     db = Database()
     assert r.lib.wire_info_open(C.byref(db), r.image, size) != 0
@@ -163,6 +238,12 @@ invalid = [
     schema([{'name': 'x', 'type': 'crc', 'algorithm': ['bogus', 1]}]),
     schema([{'name': 'x', 'type': 'uint', 'width': 8, 'constant': 1, 'value': 2}]),
     schema([{'name': 'x', 'type': 'bytes'}, {'name': 'x', 'type': 'bytes'}]),
+    schema([{'name': 'x-y', 'type': 'uint', 'width': 8},
+            {'name': 'x_y', 'type': 'uint', 'width': 8}]),
+    {'wire_format': 4, 'protocol': {'name': 'test', 'messages': [
+        {'name': 'x-y', 'fields': []}, {'name': 'x_y', 'fields': []}]}},
+    {'wire_format': 4, 'protocol': {'name': '1bad', 'messages': [
+        {'name': 'record', 'fields': []}]}},
 ]
 for bad in invalid:
     try:

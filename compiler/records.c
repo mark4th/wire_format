@@ -10,6 +10,7 @@
 #include <string.h>
 
 #define LIMIT (16u * 1024u * 1024u)
+#define WI_FLAG_FILE_CRC32C (UINT32_C(1) << 31)
 typedef const json5_value_t J;
 typedef struct { char *data; size_t size, capacity; } buffer;
 typedef struct {
@@ -21,6 +22,26 @@ typedef struct {
 static const char *types[] = { "", "uint", "bytes", "sdnv", "records", "parameter",
     "computed", "assert", "mark", "crc", "cbor-uint", "cbor-bytes", "cbor-text",
     "cbor-array", "decimal", "bcd", "terminated-uint" };
+static unsigned char c_token_char(unsigned char ch)
+{
+    if (ch >= 'a' && ch <= 'z') { return (unsigned char)(ch - 'a' + 'A'); }
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) { return ch; }
+    return '_';
+}
+static void c_token(char output[192], const char *text)
+{
+    size_t i;
+    for(i=0;text[i] && i<191;i++) { output[i]=(char)c_token_char((unsigned char)text[i]); }
+    output[i]=0;
+}
+static int c_token_equal(const char *a, const char *b)
+{
+    while(*a && *b)
+    {
+        if(c_token_char((unsigned char)*a++)!=c_token_char((unsigned char)*b++)) { return 0; }
+    }
+    return *a==*b;
+}
 static J *get(J *v, const char *name)
 {
     size_t i;
@@ -291,8 +312,12 @@ static int validate(compiler *c, J *p)
 {
     size_t i,j,k;
     unsigned depths[64]={0};
+    const char *protocol_name;
     if (!shape(c,p,"|name||description||standard||reference||messages|")) { return 0; }
-    string(c,get(p,"name"),1);
+    protocol_name=string(c,get(p,"name"),1);
+    if(!((protocol_name[0]>='a' && protocol_name[0]<='z') ||
+         (protocol_name[0]>='A' && protocol_name[0]<='Z')))
+    { return fail(c,get(p,"name"),"protocol name must begin with a letter for the generated C header"); }
     c->messages=get(p,"messages");
     if (!c->messages || c->messages->type!=JSON5_ARRAY || c->messages->as.array.count==0 || c->messages->as.array.count>64)
     { return fail(c,p,"requires 1..64 messages"); }
@@ -302,7 +327,12 @@ static int validate(compiler *c, J *p)
         const char *name;
         if (!shape(c,m,"|name||description||fields||vectors|")) { return 0; }
         name=string(c,get(m,"name"),1);
-        for(j=0;j<i;j++) { if(!strcmp(name,string(c,get(c->messages->as.array.items[j],"name"),1))) { return fail(c,m,"duplicate message name"); } }
+        for(j=0;j<i;j++)
+        {
+            const char *prior=string(c,get(c->messages->as.array.items[j],"name"),1);
+            if(!strcmp(name,prior)) { return fail(c,m,"duplicate message name"); }
+            if(c_token_equal(name,prior)) { return fail(c,m,"message names collide in the generated C header"); }
+        }
         fields=get(m,"fields"); depths[i]=1;
         if (!fields || fields->type!=JSON5_ARRAY || fields->as.array.count>128) { return fail(c,m,"requires an array of at most 128 fields"); }
         for(j=0;j<fields->as.array.count;j++)
@@ -311,7 +341,12 @@ static int validate(compiler *c, J *p)
             int t;
             if (!shape(c,f,"|name||description||type||width||length||decode_length||value||constant||when||min||max||message||count||algorithm||from||until||cbor||to_end||decode_value||byte_order||termination_mask||termination_value|")) { return 0; }
             name=string(c,get(f,"name"),1); t=kind(c,f);
-            for(k=0;k<j;k++) { if(!strcmp(name,string(c,get(fields->as.array.items[k],"name"),1))) { return fail(c,f,"duplicate field name"); } }
+            for(k=0;k<j;k++)
+            {
+                const char *prior=string(c,get(fields->as.array.items[k],"name"),1);
+                if(!strcmp(name,prior)) { return fail(c,f,"duplicate field name"); }
+                if(c_token_equal(name,prior)) { return fail(c,f,"field names collide in the generated C header"); }
+            }
             if ((get(f,"constant") && get(f,"value")) || (get(f,"length") && get(f,"decode_length"))) { return fail(c,f,"mutually exclusive field properties"); }
             if ((t==1 || t==14 || t==15) && !get(f,"width")) { return fail(c,f,"field requires width"); }
             if ((t==6 || t==7) && !get(f,"value")) { return fail(c,f,"field requires value"); }
@@ -392,6 +427,7 @@ int wfc_records_generate(const wfc_protocol_t *protocol, wfc_generated_t *out, w
     put32(header+36,(uint32_t)offset_base); put32(header+40,4);
     put32(header+44,(uint32_t)offset_base); put32(header+48,(uint32_t)(offsets.size/4));
     put32(header+52,(uint32_t)string_offset); put32(header+56,(uint32_t)strings.size);
+    put32(header+12,WI_FLAG_FILE_CRC32C);
     append(&c,&image,header,64);
     for(i=0;i<count;i++)
     {
@@ -401,10 +437,43 @@ int wfc_records_generate(const wfc_protocol_t *protocol, wfc_generated_t *out, w
         append(&c,&image,row,32);
     }
     append(&c,&image,meta.data,meta.size); append(&c,&image,offsets.data,offsets.size); append(&c,&image,strings.data,strings.size);
+    if(!c.failed) { wfc_wi_set_crc32c((uint8_t *)image.data,image.size); }
     if(!c.failed)
     {
         buffer h={0};
-        emit(&c,&h,"/* Generated by wfc. .wi stores runtime format strings. */\n#pragma once\n#define WI_RECORD_MESSAGE_COUNT %zu\n",count);
+        char prefix[192];
+        c_token(prefix,string(&c,get(p,"name"),1));
+        emit(&c,&h,"/* Generated by wfc. Do not edit. */\n#ifndef WF_GENERATED_%s_H\n#define WF_GENERATED_%s_H\n\n",prefix,prefix);
+        emit(&c,&h,"#define %s_WI_FORMAT_VERSION 4u\n",prefix);
+        emit(&c,&h,"#define %s_WI_FILE_SIZE %zuu\n",prefix,image.size);
+        emit(&c,&h,"#define %s_WI_FLAGS %uu\n",prefix,WI_FLAG_FILE_CRC32C);
+        emit(&c,&h,"#define %s_WI_CRC32C %uu\n",prefix,wfc_wi_crc32c((const uint8_t *)image.data,image.size));
+        emit(&c,&h,"#define %s_WI_MESSAGE_COUNT %zuu\n\n",prefix,count);
+        for(i=0;i<count;i++)
+        {
+            J *m=c.messages->as.array.items[i], *fields=get(m,"fields");
+            char message[192];
+            c_token(message,string(&c,get(m,"name"),1));
+            emit(&c,&h,"#define %s_MESSAGE_%s %zuu\n",prefix,message,i);
+            emit(&c,&h,"#define %s_%s_FIELD_COUNT %zuu\n",prefix,message,fields->as.array.count);
+            for(j=0;j<fields->as.array.count;j++)
+            {
+                J *f=fields->as.array.items[j];
+                char field[192];
+                int t=kind(&c,f);
+                c_token(field,string(&c,get(f,"name"),1));
+                emit(&c,&h,"#define %s_%s_ORDINAL_%s %zuu\n",prefix,message,field,j);
+                emit(&c,&h,"#define %s_%s_TYPE_%s %du\n",prefix,message,field,t);
+                if(t==4)
+                {
+                    char child[192];
+                    c_token(child,string(&c,get(f,"message"),1));
+                    emit(&c,&h,"#define %s_%s_CHILD_%s %s_MESSAGE_%s\n",prefix,message,field,prefix,child);
+                }
+            }
+            emit(&c,&h,"\n");
+        }
+        emit(&c,&h,"#endif /* WF_GENERATED_%s_H */\n",prefix);
         out->header=h.data; out->binary=(uint8_t*)image.data; out->binary_size=image.size; image.data=NULL;
     }
 done:

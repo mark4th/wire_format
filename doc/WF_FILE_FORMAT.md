@@ -1,7 +1,7 @@
 # The `.wf` source format
 
 This document specifies **source-format revision 1**, not library release 1.
-Its C/Rust JSON5 compilers were added in development commit
+Its `wfc` implementations written in C and Rust were added in development commit
 [`ba74aaa`](https://github.com/mark4th/wire_format/commit/ba74aaa)
 (2026-09-22); the current `.wi` container followed in `bf6fc14` (2026-09-23).
 **First included in tagged library release 0.1.0 (C and Rust).** Revision 1
@@ -244,7 +244,7 @@ definitions should have at least one independently derived vector per message.
 
 ## Compiler interface
 
-The C and Rust compilers implement the same interface:
+The `wfc` implementations written in C and Rust provide the same interface:
 
 ```text
 wfc check protocol.wf

@@ -16,6 +16,7 @@
 #define WI_MESSAGE_FIXED_STRING_COUNT 4U
 #define WI_FLAG_WIRE_BYTE_ORDER_LITTLE (1U << 0)
 #define WI_FLAG_WIRE_BIT_ORDER_LSB (1U << 1)
+#define WI_FLAG_FILE_CRC32C (UINT32_C(1) << 31)
 
 typedef struct {
     uint8_t *data;
@@ -61,6 +62,7 @@ typedef struct {
     uint32_t string_offset_count;
     uint32_t string_table_offset;
     uint32_t string_table_size;
+    uint32_t crc32c;
     image_message_t *messages;
 } image_t;
 
@@ -863,7 +865,8 @@ static int build_image(const wfc_protocol_t *protocol,
                      &temporary, error))
         goto done;
 
-    image->flags = (protocol->byte_order == WFC_LITTLE_ENDIAN
+    image->flags = WI_FLAG_FILE_CRC32C |
+                   (protocol->byte_order == WFC_LITTLE_ENDIAN
                         ? WI_FLAG_WIRE_BYTE_ORDER_LITTLE : 0) |
                    (protocol->bit_order == WFC_LSB_FIRST
                         ? WI_FLAG_WIRE_BIT_ORDER_LSB : 0);
@@ -940,6 +943,8 @@ static int build_image(const wfc_protocol_t *protocol,
         wfc_set_error(error, protocol->location, "out of memory");
         goto done;
     }
+    wfc_wi_set_crc32c(output.data, output.length);
+    image->crc32c = wfc_wi_crc32c(output.data, output.length);
     image->bytes = output.data;
     image->size = output.length;
     output.data = NULL;
@@ -1046,6 +1051,7 @@ static int generate_header(const wfc_protocol_t *protocol,
     DEFINE("_WI_FORMAT_VERSION", protocol->version);
     DEFINE("_WI_FILE_SIZE", (uint32_t)image->size);
     DEFINE("_WI_FLAGS", image->flags);
+    DEFINE("_WI_CRC32C", image->crc32c);
     DEFINE("_WI_MESSAGE_COUNT", (uint32_t)protocol->message_count);
     DEFINE("_WI_MESSAGE_TABLE_OFFSET", image->message_table_offset);
     DEFINE("_WI_MESSAGE_RECORD_SIZE", WI_MESSAGE_RECORD_SIZE);

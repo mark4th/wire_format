@@ -106,5 +106,5 @@ Vectors continue to cover scalar, SDNV, and byte fields. Messages containing
 `records` or `choice` fields are exercised through the generated runtime
 programs rather than inline vectors; their referenced leaf messages retain
 ordinary source vectors. The C and
-Rust compiler conformance suite executes generated counted-record and choice
+Rust `wfc` conformance suite executes generated counted-record and choice
 programs in addition to comparing their `.wi` and header output byte for byte.

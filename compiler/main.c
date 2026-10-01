@@ -241,7 +241,7 @@ int main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc == 2 && (strcmp(argv[1], "-V") == 0 || strcmp(argv[1], "--version") == 0)) {
-        puts("wfc 0.1.0");
+        puts("wfc 0.2.0");
         return EXIT_SUCCESS;
     }
     if (argc < 2) {

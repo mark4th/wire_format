@@ -68,6 +68,14 @@ int main(void)
     uint8_t wire[sizeof expected] = {0};
     wi_vars_t vars;
 
+    if ((size_t)(wfc_v3_wi_end - wfc_v3_wi_start) !=
+            RECORD_DEMO_WI_FILE_SIZE ||
+        !wi_file_crc32c_valid(wfc_v3_wi_start,
+                              (size_t)(wfc_v3_wi_end - wfc_v3_wi_start)))
+    {
+        return 5;
+    }
+
     item_rows[0].values[0] = 0x11;
     item_rows[0].values[1] = 1;
     item_rows[1].values[0] = 0x22;

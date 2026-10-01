@@ -298,7 +298,7 @@ The original stack operations interpret values as signed 64-bit integers.
 Moving all 64 bits through `%q` and `%Q` preserves them, but `%>` and `%<`
 compare them as signed values. Use the unsigned `%u` operations when a
 calculation or comparison must treat the high bit as part of a positive
-unsigned value. The C compiler uses those unsigned operations for expressions
+unsigned value. The native `wfc` implementation uses those unsigned operations for expressions
 in source-format 4.
 
 ---
@@ -381,6 +381,7 @@ any shared formats or data, then execute a string:
 | `wi_init(&state, output, capacity, params, count)` | Initialize encoding with an output buffer and optional `int64_t` parameters |
 | `wi_decode_init(&state, input, length, params, count)` | Initialize decoding with the received bytes and optional parameters |
 | `wi_set_formats(&state, formats, count)` | Attach the table referenced by `%[n]` and `%J[n]`; returns 0 on success or -1 for invalid table size/depth |
+| `wi_file_crc32c_valid(image, length)` | Verify the mandatory CRC-32C in a complete compiled `.wi` image |
 | `wi_set_slice(&state, slot, bytes, length)` | Attach a byte slice for `%v`, `%V`, `%z`, `%N` and `%R`; returns 0 or -1 |
 | `wi_set_record_list(&state, slot, &list)` | Attach a bounded record list for numbered `%J[n]`; returns 0 or -1 |
 | `wi_parse(&state, format)` | Execute a format string; returns the number of bytes emitted |
@@ -477,10 +478,15 @@ with named fields. It currently accepts compiled-format 4 `.wi` images, introduc
 in the source-format section next. It still executes their format strings
 through `wi_parse()`.
 
+Applications compiled with a protocol include its generated header and use
+the symbolic message and field ordinals there. Name lookup remains an optional
+convenience for generic tools that intentionally load a catalog without its
+generated header.
+
 | Function | Purpose |
 |---|---|
 | `wire_info_open()` | Validate a compiled image already supplied in memory and create a borrowed view |
-| `wire_info_find()`, `wire_info_field()` | Find message and field indices by name; return -1 when absent |
+| `wire_info_find()`, `wire_info_field()` | Optional name lookup for generic catalog tools; ordinary applications use generated constants |
 | `wire_info_message_name()`, `wire_info_field_count()`, `wire_info_field_name()`, `wire_info_field_type()`, `wire_info_child()` | Inspect message/field metadata and child layouts |
 | `wire_info_format()` | Obtain the selected encode or decode format string |
 | `wire_info_encode()`, `wire_info_decode()` | Bind a caller-owned record and execute the chosen format |
@@ -516,7 +522,7 @@ optional. The compiler does not generate a separate C codec for each message.
 
 ### Source syntax and versions
 
-The C compiler reads UTF-8 JSON5: ordinary JSON plus comments, trailing commas,
+The native `wfc` implementation reads UTF-8 JSON5: ordinary JSON plus comments, trailing commas,
 single-quoted strings, unquoted keys and hexadecimal integer literals. For
 example, `0xFF` is the integer 255, while `"0xFF"` is a string. Integers used
 as wire values must fit in an unsigned 64-bit value. Unknown and duplicate
@@ -532,7 +538,7 @@ The top-level object has exactly two properties:
 The `wire_format` number chooses a source vocabulary and caller-data model.
 It is a **file-format revision, not a library release** or the version of the
 network protocol being described. The current compiler and Rust packages
-report `0.1.0`; that does not restrict them to source-format 1. Likewise, the
+report `0.2.0`; that does not restrict them to source-format 1. Likewise, the
 `.4` in `libwire_info.so.4` identifies the shared-library ABI, not release 4.0.
 
 | Source format | Features added | Application interface | Compilers |
@@ -546,7 +552,8 @@ Versions 1–3 are compatible extensions of the original source model. Version 4
 uses explicit expressions and named fields; its declarations are documented
 separately below rather than mixed into the earlier vocabulary. All use runtime
 format strings. The DNS example uses version 1; the CCSDS definitions use
-version 4. The Rust compiler and interpreter currently support versions 1–3.
+version 4. The Rust `wfc` implementation and interpreter currently support
+versions 1–3.
 
 #### Library availability and backward compatibility
 
@@ -598,8 +605,11 @@ Versions 1–3 identifiers start with a lower-case ASCII letter and contain only
 lower-case letters, digits and single hyphens; they cannot end in a hyphen.
 The generated header converts hyphens to underscores and names to upper case.
 Version 4 identifiers may also contain upper-case letters, underscores and dots,
-with a maximum length of 191 bytes. Reserve `parent.` for enclosing-record
-references. Text and identifiers cannot contain NUL characters.
+with a maximum length of 191 bytes. A version-4 protocol name must begin with a
+letter so it can prefix generated C macros. Distinct names must also remain
+distinct after upper-casing and replacing punctuation with underscores. Reserve
+`parent.` for enclosing-record references. Text and identifiers cannot contain
+NUL characters.
 
 ### A complete fixed-record example
 
@@ -956,7 +966,7 @@ its own separate example catalog.
 
 ### Compiling and using the database
 
-Build the C compiler and compile the fixed-record example:
+Build the native `wfc` executable and compile the fixed-record example:
 
 ```sh
 make wfc
@@ -970,7 +980,8 @@ binary. Compilation is deterministic and produces `build/status.wi` and
 `build/status.h`. Output files are staged before replacement, so validation
 failures leave existing outputs intact.
 
-The independent Rust compiler uses the same command interface for versions 1–3:
+The independent Rust implementation of `wfc` uses the same command interface
+for versions 1–3:
 
 ```sh
 cargo run -p wfc -- check status.wf
@@ -979,7 +990,7 @@ cargo run -p wfc -- status.wf --output build/status-rust
 
 The conformance suite compares C/Rust output byte for byte for those versions.
 JSON parsing belongs to the build-host compiler and tools, not the target
-runtime. The C compiler's parser lives in `compiler/`; Rust's JSON5/Serde
+runtime. The native implementation's parser lives in `compiler/`; Rust's JSON5/Serde
 dependencies belong to `rust/wfc/`.
 
 A `.wi` stores a header, message metadata, field metadata, string-offset tables
@@ -987,11 +998,13 @@ and a string table. Message string slots include the name, description,
 **encode string, decode string**, and field names. Stored locations are offsets;
 there are no native pointers or host structure overlays. The binary container
 makes the table easy to load or embed while retaining executable format strings
-as text for the interpreter.
+as text for the interpreter. Every newly generated `.wi` includes a mandatory
+CRC-32C over the complete file; readers validate it before exposing catalog
+contents.
 
 | Output/API | Versions 1–3 | Version 4 |
 |---|---|---|
-| `.h` | Symbolic message/field ordinals, offsets, sizes and variable-size flags | Currently a message-count macro; look up messages and fields by name |
+| `.h` | Symbolic message/field ordinals, offsets, sizes and variable-size flags | File identity plus symbolic message ordinals, field ordinals/types/counts and child-message bindings |
 | `.wi` loading | Application supplies a loader/view; DNS demonstrates an embedded view | `wire_info_open()` validates the named-record table |
 | Runtime call | Attach parameters/slices/record lists and call `wi_parse()` | `wire_info_encode()` / `wire_info_decode()` bind records and call the same `wi_parse()` |
 
@@ -1212,7 +1225,7 @@ let params = [
 `WireFormat::set_formats(&formats)` supplies the table used by `%[n]` and
 checks the actual nesting depth before parsing. The implementation uses a fixed
 return stack and remains `no_std`, allocation-free, and dependency-free. The
-host-only Rust compiler under `rust/wfc/` owns the JSON5 and Serde dependencies;
+host-only Rust `wfc` implementation under `rust/wfc/` owns the JSON5 and Serde dependencies;
 they are not linked into the run-time crate. Buffer exhaustion is a
 Rust `Error::OutputFull` or `Error::InputEof` rather than C's `overrun` flag.
 Fault policy is set with `WireFormat::set_abort_mask()`, and raised fault bits

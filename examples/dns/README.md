@@ -12,7 +12,7 @@ make dns_demo
 
 The build performs these operations:
 
-1. Builds the C `wfc` compiler.
+1. Builds the native `wfc` executable, which is written in C.
 2. Checks and compiles `dns.wf`.
 3. Writes `dns_protocol.wi` and `dns_protocol.h` under `target/examples/dns/`.
 4. Embeds the database with `dns_protocol.S`.

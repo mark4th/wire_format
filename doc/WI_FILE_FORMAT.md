@@ -49,7 +49,7 @@ The version 1 header is 64 octets:
 | 4 | 2 | compiled-format version: `1` |
 | 6 | 2 | header size: `64` |
 | 8 | 4 | total file size |
-| 12 | 4 | protocol flags |
+| 12 | 4 | protocol and compiled-file flags |
 | 16 | 4 | message count |
 | 20 | 4 | message-record size: `32` |
 | 24 | 4 | message-record table offset |
@@ -61,12 +61,19 @@ The version 1 header is 64 octets:
 | 48 | 4 | complete string-offset entry count |
 | 52 | 4 | string-table offset |
 | 56 | 4 | string-table size |
-| 60 | 4 | reserved; zero in version 1 |
+| 60 | 4 | CRC-32C of the complete file, stored little-endian |
 
 Protocol flag bit 0 is set when the described wire protocol uses little-endian
 scalars.  Bit 1 is set when it numbers bit fields least-significant bit first.
-These flags describe the protocol, not the `.wi`; the `.wi` integers are
-always little-endian.  All other version 1 flag bits are zero.
+Bit 31 is the mandatory `WI_FLAG_FILE_CRC32C` compiled-file integrity flag.
+Bits 0 and 1 describe the protocol, not the `.wi`; the `.wi` integers are
+always little-endian. All other flag bits are zero.
+
+The CRC uses the reflected CRC-32C (Castagnoli) polynomial `0x82f63b78`, an
+initial value of `0xffffffff`, and a final XOR of `0xffffffff`. It covers every
+octet in the file, including the header, tables, alignment padding and string
+table. Header octets 60 through 63 are treated as zero during calculation.
+Readers must reject an image whose stored and calculated CRC values differ.
 
 The protocol string section contains four 32-bit entries:
 
@@ -180,16 +187,17 @@ The names are conveniences, not a required loading API.
 
 ## Validation and versioning
 
-Before using an untrusted or externally stored `.wi`, an application should
-at minimum validate the magic, version, header and file sizes, section ranges,
-record size, string offsets, and NUL termination.  An application embedding a
-compiler-produced file in immutable firmware may instead establish those
-properties as part of its build.
+Before using a `.wi`, an application must validate its CRC before exposing any
+contained strings or metadata. It must also validate the magic, version,
+header and file sizes, section ranges, record size, string offsets, and NUL
+termination. The CRC detects accidental corruption; it is not an authenticity
+or tamper-resistance mechanism. A signature or authenticated containing image
+is still required when the threat model includes deliberate modification.
 
-Version 1 contains no checksum or signature.  A container, firmware image, or
-transport may provide integrity and authenticity without duplicating that
-policy inside the protocol description.  A future incompatible layout uses a
-new compiled-format version; readers must reject versions they do not support.
+The CRC requirement was added in library release 0.2.0 without changing
+source-format revisions 1 through 4. Newly compiled files set flag bit 31 and
+contain the CRC; current readers reject files without it. Existing `.wi` files
+from release 0.1.0 must be recompiled from their `.wf` sources.
 
 ## Version 2 additions
 

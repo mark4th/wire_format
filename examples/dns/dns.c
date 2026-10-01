@@ -27,7 +27,10 @@ static int dns_database_valid(void)
     return size == DNS_WI_FILE_SIZE
         && size >= 64
         && memcmp(wi_dns_database_start, "WI\0\0", 4) == 0
-        && get_u32(wi_dns_database_start + 8) == size;
+        && get_u32(wi_dns_database_start + 8) == size
+        && get_u32(wi_dns_database_start + 12) == DNS_WI_FLAGS
+        && get_u32(wi_dns_database_start + 60) == DNS_WI_CRC32C
+        && wi_file_crc32c_valid(wi_dns_database_start, size);
 }
 
 static const char *dns_string(uint32_t section, uint32_t slot)

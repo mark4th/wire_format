@@ -130,6 +130,8 @@ char *wfc_duplicate(const char *text, size_t length);
 int wfc_identifier_valid(const char *identifier);
 uint8_t wfc_field_width(const wfc_field_t *field);
 int wfc_value_fits(uint64_t value, uint8_t width);
+uint32_t wfc_wi_crc32c(const uint8_t *data, size_t length);
+void wfc_wi_set_crc32c(uint8_t *data, size_t length);
 
 int wfc_records_generate(const wfc_protocol_t *, wfc_generated_t *, wfc_error_t *);
 int wfc_records_check(const wfc_protocol_t *, wfc_summary_t *, wfc_error_t *);

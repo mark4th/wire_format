@@ -73,3 +73,32 @@ int wfc_value_fits(uint64_t value, uint8_t width)
 {
     return width == 64 || value < (UINT64_C(1) << width);
 }
+
+/* CRC-32C over a complete .wi image.  The checksum field at bytes 60..63 is
+ * defined as zero while calculating, allowing callers to verify an image
+ * without modifying immutable storage. */
+uint32_t wfc_wi_crc32c(const uint8_t *data, size_t length)
+{
+    uint32_t crc = UINT32_MAX;
+    size_t index;
+
+    for (index = 0; index < length; index++) {
+        uint8_t byte = index >= 60 && index < 64 ? 0 : data[index];
+        unsigned bit;
+
+        crc ^= byte;
+        for (bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0x82f63b78U & (uint32_t)-(int32_t)(crc & 1));
+    }
+    return ~crc;
+}
+
+void wfc_wi_set_crc32c(uint8_t *data, size_t length)
+{
+    uint32_t crc = wfc_wi_crc32c(data, length);
+
+    data[60] = (uint8_t)crc;
+    data[61] = (uint8_t)(crc >> 8);
+    data[62] = (uint8_t)(crc >> 16);
+    data[63] = (uint8_t)(crc >> 24);
+}

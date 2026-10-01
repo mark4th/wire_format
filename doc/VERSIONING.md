@@ -10,12 +10,10 @@
 | Shared-library ABI | `.4` in `libwire_info.so.4` | The C binary interface used when linking applications |
 | Protocol version | A field in the protocol being described, if it has one | The network protocol's own version, independent of all the above |
 
-The current library/tool release is **0.1.0**, identified by the annotated
-Git tag [`v0.1.0`](https://github.com/mark4th/wire_format/tree/v0.1.0).
-The C compiler and Rust package versions agree with that tag. This is the
-first tagged release; it includes all features listed below. Earlier untagged
-development snapshots also reported 0.1.0, so use the tag or a commit identifier
-when selecting an exact implementation.
+The current library/tool version is **0.2.0**. The native `wfc` and Rust package
+versions agree. Release 0.1.0 remains identified by the annotated Git tag
+[`v0.1.0`](https://github.com/mark4th/wire_format/tree/v0.1.0); use a release
+tag or commit identifier when selecting an exact implementation.
 
 Source format 4 does **not** mean library release 4.0, and the shared-library
 SONAME is not a release number either. See the [release notes](../CHANGELOG.md)
@@ -40,14 +38,14 @@ model. Existing revision-1–3 definitions remain supported without conversion.
 
 Support is specific to the implementation and interface:
 
-- The current C compiler accepts source revisions 1–4. The C interpreter
+- The native `wfc` implementation accepts source revisions 1–4. The C interpreter
   retains the earlier numbered-parameter operations alongside the named-record
   operations. Applications using revisions 1–3 keep their existing table
   loading and parameter/slice/record-list interfaces.
 - `wire_info_open()` is the named-record adapter and accepts compiled revision
   4 only. It is not a universal loader for older images. This restriction does
   not remove the older interpreter interfaces or their features.
-- The Rust compiler and interpreter support revisions 1–3. Named-record
+- The Rust `wfc` implementation and interpreter support revisions 1–3. Named-record
   revision 4 has not been implemented in Rust; this is an implementation gap,
   not deprecation of earlier support.
 - Readers reject unsupported future compiled revisions rather than assuming
@@ -71,7 +69,7 @@ numbers have been assigned retroactively to development snapshots.
 
 | Revision | Additions | First implementation in repository history | Current support |
 |---|---|---|---|
-| [1](WF_FILE_FORMAT.md) | Fixed scalar and packed-bit fields, constants, layout checks, test vectors, generated ordinals, encode/decode strings | C/Rust JSON5 compilers: [ba74aaa](https://github.com/mark4th/wire_format/commit/ba74aaa), 2026-09-22. The current `.wi` name and `WI` magic replaced the experimental WFB container in [bf6fc14](https://github.com/mark4th/wire_format/commit/bf6fc14), 2026-09-23. | C and Rust |
+| [1](WF_FILE_FORMAT.md) | Fixed scalar and packed-bit fields, constants, layout checks, test vectors, generated ordinals, encode/decode strings | `wfc` implementations written in C and Rust: [ba74aaa](https://github.com/mark4th/wire_format/commit/ba74aaa), 2026-09-22. The current `.wi` name and `WI` magic replaced the experimental WFB container in [bf6fc14](https://github.com/mark4th/wire_format/commit/bf6fc14), 2026-09-23. | C and Rust |
 | [2](WF_FILE_FORMAT_V2.md) | Revision 1 plus one variable-length final byte field, attached slices, `%v`/`%R`, and a variable-size message flag | [bf6fc14](https://github.com/mark4th/wire_format/commit/bf6fc14), 2026-09-23 | C and Rust |
 | [3](WF_FILE_FORMAT_V3.md) | Revision 2 plus SDNV integers, length-delimited byte slices, derived lengths/counts, counted child records and selector-driven choices; `%d`/`%D`, `%z`, `%V`/`%N`, `%k` and numbered `%J[n]` | [92f5533](https://github.com/mark4th/wire_format/commit/92f5533), 2026-09-29 | C and Rust |
 | [4](WIRE_INFO_V4.md) | Named fields and caller records, unsigned expressions, conditional fields, assertions, sequential bit fields, nested records, marks/checksums, CBOR values and arrays, decimal/BCD and terminated integers; named operands and record metadata, with the reusable `wire_info` loader/adapter | [92f5533](https://github.com/mark4th/wire_format/commit/92f5533), 2026-09-29 | C |
@@ -128,7 +126,7 @@ number from a file-format revision.
 
 When publishing a release:
 
-1. Update the C compiler version in `compiler/main.c`, both Rust package
+1. Update the native `wfc` version in `compiler/main.c`, both Rust package
    versions in `rust/Cargo.toml` and `rust/wfc/Cargo.toml`, and their entries
    in `Cargo.lock`. Keep them consistent with the intended tag.
 2. Update `CHANGELOG.md`, this feature history and any affected feature guides.
@@ -145,3 +143,18 @@ When publishing a release:
 
 File-format revisions and the shared-library SONAME change only when their
 respective formats or ABI require it, not on every library release.
+
+## Release 0.2.0
+
+Newly generated `.wi` files contain a mandatory CRC-32C at header offset 60
+and set header flag bit 31. This integrity field applies to source/compiled
+revisions 1 through 4 and does not change their protocol-description features.
+It is nevertheless a compiled-artifact compatibility break: release-0.1.0
+`.wi` files must be recompiled, and release-0.1.0 readers reject the new
+nonzero reserved flag and checksum fields. Release 0.2.0 therefore requires
+applications to rebuild `.wi` files from their `.wf` sources.
+
+Revision-4 generated headers in 0.2.0 also provide protocol-prefixed file
+identity, message ordinals, field ordinals and types, field counts, and child
+message bindings. Applications built with a specific protocol can use those
+constants directly; runtime name lookup remains available for generic tools.

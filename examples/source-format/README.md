@@ -11,7 +11,7 @@ make wfc
     --output target/examples/source-format/example_telemetry
 ```
 
-The Rust compiler accepts the same source:
+The Rust implementation of `wfc` accepts the same source:
 
 ```sh
 cargo run -p wfc -- check examples/source-format/example-telemetry.wf

@@ -177,6 +177,12 @@ int     wi_set_slice(wi_vars_t *v, int slot, const uint8_t *data, size_t length)
 // whose advertised count exceeds list->capacity.
 int     wi_set_record_list(wi_vars_t *v, int slot, wi_record_list_t *list);
 
+// Calculate or verify the mandatory CRC-32C in a complete .wi image. Bytes
+// 60..63 are treated as zero while calculating. Validation also requires a
+// 64-byte minimum image and compares the stored little-endian value.
+uint32_t wi_file_crc32c(const void *data, size_t length);
+int      wi_file_crc32c_valid(const void *data, size_t length);
+
 // ⚠ CHECK v->overrun AFTER PARSING.  the return value is the length
 // produced, which for a truncated encode is a short but plausible
 // number; overrun is the only thing that says it is short because the

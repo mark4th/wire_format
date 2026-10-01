@@ -28,6 +28,38 @@ static void record_sequence(wi_vars_t *, int);
 
 // -----------------------------------------------------------------------
 
+uint32_t wi_file_crc32c(const void *data, size_t length)
+{
+    const uint8_t *bytes = data;
+    uint32_t crc = UINT32_MAX;
+    size_t index;
+
+    if (bytes == NULL) { return 0; }
+    for (index = 0; index < length; index++)
+    {
+        uint8_t byte = index >= 60 && index < 64 ? 0 : bytes[index];
+        unsigned bit;
+
+        crc ^= byte;
+        for (bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0x82f63b78U & (uint32_t)-(int32_t)(crc & 1));
+    }
+    return ~crc;
+}
+
+int wi_file_crc32c_valid(const void *data, size_t length)
+{
+    const uint8_t *bytes = data;
+    uint32_t stored;
+
+    if (bytes == NULL || length < 64) { return 0; }
+    stored = (uint32_t)bytes[60] | (uint32_t)bytes[61] << 8 |
+             (uint32_t)bytes[62] << 16 | (uint32_t)bytes[63] << 24;
+    return stored == wi_file_crc32c(bytes, length);
+}
+
+// -----------------------------------------------------------------------
+
 // ⚠ NOT assert().  with asserts on this aborted the process and with
 // -DNDEBUG it wrote past the buffer; a counted loop makes both reachable
 // from a bad count.  overrun stops the parse and the caller checks it.

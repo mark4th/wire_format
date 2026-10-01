@@ -20,6 +20,7 @@ const MESSAGE_FIXED_STRING_COUNT: usize = 4;
 
 const FLAG_WIRE_BYTE_ORDER_LITTLE: u32 = 1 << 0;
 const FLAG_WIRE_BIT_ORDER_LSB: u32 = 1 << 1;
+const FLAG_FILE_CRC32C: u32 = 1 << 31;
 
 pub struct Generated {
     pub header: String,
@@ -594,6 +595,7 @@ struct Image {
     string_offset_count: u32,
     string_table_offset: u32,
     string_table_size: u32,
+    crc32c: u32,
     messages: Vec<ImageMessage>,
 }
 
@@ -758,7 +760,7 @@ fn build_image(protocol: &Protocol, messages: &[CompiledMessage<'_>]) -> Result<
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let flags = match protocol.byte_order {
+    let flags = FLAG_FILE_CRC32C | match protocol.byte_order {
         ByteOrder::BigEndian => 0,
         ByteOrder::LittleEndian => FLAG_WIRE_BYTE_ORDER_LITTLE,
     } | match protocol.bit_order {
@@ -826,6 +828,8 @@ fn build_image(protocol: &Protocol, messages: &[CompiledMessage<'_>]) -> Result<
     debug_assert_eq!(bytes.len(), string_table_offset);
     bytes.extend_from_slice(&strings.bytes);
     debug_assert_eq!(bytes.len(), file_size);
+    let crc32c = wi_crc32c(&bytes);
+    bytes[60..64].copy_from_slice(&crc32c.to_le_bytes());
 
     Ok(Image {
         bytes,
@@ -838,6 +842,7 @@ fn build_image(protocol: &Protocol, messages: &[CompiledMessage<'_>]) -> Result<
         string_offset_count,
         string_table_offset: string_table_offset_u32,
         string_table_size,
+        crc32c,
         messages: image_messages,
     })
 }
@@ -874,6 +879,18 @@ fn put_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
+fn wi_crc32c(data: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for (index, stored) in data.iter().copied().enumerate() {
+        let byte = if (60..64).contains(&index) { 0 } else { stored };
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82f63b78 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
 fn generate_header(protocol: &Protocol, messages: &[CompiledMessage<'_>], image: &Image) -> String {
     let prefix = c_identifier(&protocol.name).to_ascii_uppercase();
     let guard = format!("WF_GENERATED_{prefix}_H");
@@ -897,6 +914,7 @@ fn generate_header(protocol: &Protocol, messages: &[CompiledMessage<'_>], image:
         image.bytes.len() as u32,
     );
     define(&mut output, &format!("{prefix}_WI_FLAGS"), image.flags);
+    define(&mut output, &format!("{prefix}_WI_CRC32C"), image.crc32c);
     define(
         &mut output,
         &format!("{prefix}_WI_MESSAGE_COUNT"),
@@ -1110,6 +1128,8 @@ mod tests {
         assert_eq!(u16_at(&image.bytes, 4), FORMAT_VERSION);
         assert_eq!(u16_at(&image.bytes, 6), HEADER_SIZE as u16);
         assert_eq!(u32_at(&image.bytes, 8) as usize, image.bytes.len());
+        assert_eq!(u32_at(&image.bytes, 12) & FLAG_FILE_CRC32C, FLAG_FILE_CRC32C);
+        assert_eq!(u32_at(&image.bytes, 60), wi_crc32c(&image.bytes));
         assert_eq!(u32_at(&image.bytes, 16), 1);
         assert_eq!(u32_at(&image.bytes, 20), MESSAGE_RECORD_SIZE);
         assert_eq!(

@@ -43,6 +43,9 @@ int main(void)
     if ((size_t)(wfc_v2_wi_end - wfc_v2_wi_start) !=
         VARIABLE_TAIL_WI_FILE_SIZE)
         return 1;
+    if (!wi_file_crc32c_valid(wfc_v2_wi_start,
+                              (size_t)(wfc_v2_wi_end - wfc_v2_wi_start)))
+        return 11;
     if (get_u16(wfc_v2_wi_start + 4) != 2)
         return 2;
     if (get_u32(wfc_v2_wi_start + VARIABLE_TAIL_PACKET_RECORD_OFFSET + 24) != 1)

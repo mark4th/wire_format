@@ -3,11 +3,12 @@
 This guide describes **source/compiled-format revision 4**, not library
 release 4. Its C support was added in development commit
 [`92f5533`](https://github.com/mark4th/wire_format/commit/92f5533)
-(2026-09-29). **First included in tagged library release 0.1.0 (C).** Rust
-support has not been implemented. Earlier C features remain supported through their existing
-interfaces; see [versioning and feature history](VERSIONING.md).
+(2026-09-29). **First included in tagged library release 0.1.0 (C).** Release
+0.2.0 added mandatory `.wi` CRC validation and complete generated C bindings.
+Rust support has not been implemented. Earlier C features remain supported
+through their existing interfaces; see [versioning and feature history](VERSIONING.md).
 
-The C `wfc` compiler reads `.wf` sources (JSON5) and writes `.wi` files
+The native `wfc` executable is written in C. It reads `.wf` sources (JSON5) and writes `.wi` files
 containing **encode/decode format strings and their lookup table**. `wire_info`
 loads that table, binds caller records, and invokes `wi_parse()` in
 `wire_format.c`. All field operations, expressions, conditions and child calls
@@ -32,13 +33,35 @@ Libraries are `target/wire-info/libwire_info.a` and `libwire_info.so.4` (with a
 `.so` symlink). The `.4` identifies the shared-library ABI, not a library release.
 Both include the loader and the existing format interpreter.
 `INFO_BUILD` selects an independent output directory. All applications reuse
-these libraries. `install-info` installs the C compiler, libraries and public
+these libraries. `install-info` installs the native `wfc`, libraries and public
 headers. Python is used by the tests and example catalog builder, not `wfc`.
+
+The generated header is the normal application binding. It identifies the
+exact file by size and CRC and defines protocol-prefixed message ordinals,
+field counts, field ordinals/types, and child-message relationships. A generic
+tool may still discover names through runtime metadata.
+
+For example, protocol `example`, message `batch`, and record field `items`
+produce constants shaped like:
+
+```c
+#define EXAMPLE_WI_FILE_SIZE                 412u
+#define EXAMPLE_WI_CRC32C                    305419896u
+#define EXAMPLE_MESSAGE_BATCH                1u
+#define EXAMPLE_BATCH_FIELD_COUNT            2u
+#define EXAMPLE_BATCH_ORDINAL_ITEMS          1u
+#define EXAMPLE_BATCH_TYPE_ITEMS             4u
+#define EXAMPLE_BATCH_CHILD_ITEMS            EXAMPLE_MESSAGE_ITEM
+```
+
+Names are upper-cased and punctuation becomes an underscore. The compiler
+rejects names that would collide after this conversion. Protocol names must
+begin with a letter.
 
 Versions 1–3 keep their existing source, binary layout and format operations.
 Version 4 adds named record operands and metadata within the same `WI\0\0`
 file family. The record adapter `wire_info_open` currently accepts version 4;
-earlier consumers keep their existing `.wi` loading APIs. The Rust compiler
+earlier consumers keep their existing `.wi` loading APIs. The Rust `wfc` implementation
 and parser currently support versions 1–3, not the named-record extensions.
 
 ## Source
@@ -157,15 +180,18 @@ the operation; there is no unchecked pointer arithmetic supplied by schemas.
 
 ## Runtime API and ownership
 
-`wire_info_open()` validates the image's layout, table bounds, strings,
-format-string syntax/condition nesting, field types and child references.
+`wire_info_open()` validates the image's mandatory file CRC before exposing
+catalog contents, then validates layout, table bounds, strings, format-string
+syntax/condition nesting, field types and child references.
 Stack bounds and operand values are checked while interpreting the strings.
 Retain the immutable image for the database's lifetime. Validation does not
 prove a schema is semantically correct; encoding/decoding can still report a
 schema error (for example a missing enclosing context or misalignment).
 Images are data interpreted by the bounded engine, never executable code.
 
-`wire_info_find`, `wire_info_field`, and metadata functions expose the schema.
+Generated constants select messages and record fields without runtime lookup.
+`wire_info_find`, `wire_info_field`, and metadata functions remain available
+for generic tools and for the interpreter's internal named-field resolution.
 A `wire_info_record_t` points to caller-owned `wire_info_value_t` fields in
 schema order. Set capacity to the number allocated. For each child list,
 provide a records pointer and capacity, and initialize every child's values
@@ -242,13 +268,13 @@ size 64 at 6, and the existing u32 slots:
 
 | Offset | Value |
 |---|---|
-| 8, 12 | File size, protocol flags (zero) |
+| 8, 12 | File size, flags (`WI_FLAG_FILE_CRC32C`, bit 31) |
 | 16, 20, 24 | Message count, message row size (32), message table offset (64) |
 | 28, 32 | Metadata/value table offset and byte length |
 | 36, 40 | Protocol string-offset section address and count (4) |
 | 44, 48 | Combined string-offset sections address and u32 entry count |
 | 52, 56 | String table address and byte length |
-| 60 | Reserved zero |
+| 60 | CRC-32C of the complete image, with this field treated as zero |
 
 Tables are contiguous in that order. The protocol's four string slots are
 name, description, standard and reference. Each 32-byte message row contains:

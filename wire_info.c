@@ -4,6 +4,8 @@
 #include "wire_format.h"
 #include <string.h>
 
+#define WI_FLAG_FILE_CRC32C (UINT32_C(1) << 31)
+
 static uint32_t u32(const uint8_t *p)
 { return (uint32_t)p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24; }
 static const uint8_t *message_at(const wire_info_t *db, unsigned message)
@@ -128,8 +130,9 @@ wire_info_status_t wire_info_open(wire_info_t *db, const void *data, size_t size
     if(p==NULL || size<64) { return WIRE_INFO_SCHEMA; }
     count=u32(p+16);
     if(memcmp(p,"WI\0\0",4) || p[4]!=4 || p[5]!=0 || p[6]!=64 || p[7]!=0 ||
-       u32(p+8)!=size || u32(p+12)!=0 || count==0 || count>WI_MAX_FORMATS ||
-       u32(p+20)!=32 || u32(p+24)!=64 || u32(p+40)!=4 || u32(p+60)!=0) { return WIRE_INFO_SCHEMA; }
+       u32(p+8)!=size || u32(p+12)!=WI_FLAG_FILE_CRC32C || count==0 || count>WI_MAX_FORMATS ||
+       u32(p+20)!=32 || u32(p+24)!=64 || u32(p+40)!=4) { return WIRE_INFO_SCHEMA; }
+    if(!wi_file_crc32c_valid(p,size)) { return WIRE_INFO_CHECKSUM; }
     messages_end=64+(uint64_t)count*32;
     meta_end=(uint64_t)u32(p+28)+u32(p+32);
     offset_end=(uint64_t)u32(p+44)+(uint64_t)u32(p+48)*4;
